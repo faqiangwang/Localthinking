@@ -17,22 +17,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows - 已验证成功
           - platform: 'windows-x86_64'
             os: windows-latest
             target: x86_64-pc-windows-msvc
-
-          # Linux - 启用并修复
           - platform: 'linux-x86_64'
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-
-          # macOS - 禁用代码签名进行构建
           - platform: 'macos-x86_64'
             os: macos-latest
             target: x86_64-apple-darwin
-
-          # macOS ARM64 - 禁用代码签名进行构建
           - platform: 'macos-aarch64'
             os: macos-latest
             target: aarch64-apple-darwin
@@ -54,8 +47,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install system dependencies (Ubuntu only)
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -66,18 +59,12 @@ jobs:
             file \
             libssl-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-1 \
-            libappindicator3-1 \
-            libxdo-dev \
-            libxrandr-dev
+            librsvg2-dev
 
-      - name: Install dependencies (macOS)
+      - name: Install system dependencies (macOS only)
         if: matrix.os == 'macos-latest'
         run: |
-          brew update
-          brew install openssl@3 readline
+          brew install openssl@3
           echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> $GITHUB_ENV
@@ -85,20 +72,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Cache Rust
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build (with macOS signing disabled)
+      - name: Build application
         env:
-          # macOS: 禁用代码签名
           TAURI_BUNDLE_SKIP_SIGNING: ${{ matrix.os == 'macos-latest' && 'true' || '' }}
         run: npm run tauri build -- --target ${{ matrix.target }}
 
