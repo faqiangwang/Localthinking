@@ -80,23 +80,14 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Build Tauri application (Windows/Linux)
-        if: matrix.os != 'macos-latest'
+      - name: Build Tauri application
         run: |
           echo "Starting Tauri build for ${{ matrix.target }}..."
-          npx tauri build -- --target ${{ matrix.target }} --verbose
+          npm run tauri build -- --target ${{ matrix.target }}
         env:
           TAURI_BUNDLE_SKIP_SIGNING: 'true'
-
-      - name: Build Tauri application (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          echo "Starting Tauri build for ${{ matrix.target }}..."
-          npx tauri build -- --target ${{ matrix.target }} --verbose
-        env:
-          TAURI_BUNDLE_SKIP_SIGNING: 'true'
-          APPLE_SIGNING_IDENTITY: '-'
-          APPLE_TEAM_ID: '-'
+          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && '-' || '' }}
+          APPLE_TEAM_ID: ${{ matrix.os == 'macos-latest' && '-' || '' }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
