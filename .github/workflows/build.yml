@@ -71,12 +71,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Verify Tauri CLI
-        run: |
-          echo "Checking Tauri CLI..."
-          npx tauri --version
-          echo "Tauri CLI verified"
-
       - name: Build frontend
         run: npm run build
 
