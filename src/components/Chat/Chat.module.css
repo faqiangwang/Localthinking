@@ -1,0 +1,7 @@
+/* src/components/Chat/Chat.module.css */
+
+.chatContainer {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}

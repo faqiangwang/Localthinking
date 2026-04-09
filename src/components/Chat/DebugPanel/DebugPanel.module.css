@@ -1,0 +1,125 @@
+/* src/components/Chat/DebugPanel/DebugPanel.module.css */
+
+.debugPanel {
+  margin: var(--spacing-md);
+  padding: 0;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  animation: slideDown var(--transition-base);
+  overflow: hidden;
+}
+
+.debugHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-md);
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border-medium);
+}
+
+.debugHeader h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.closeBtn {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+}
+
+.closeBtn:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+.closeBtn:active {
+  transform: scale(0.95);
+}
+
+.debugSection {
+  padding: var(--spacing-md);
+  padding-bottom: 0;
+}
+
+.debugSection:last-child {
+  padding-bottom: var(--spacing-md);
+}
+
+.debugSection h4 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #495057;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.debugInfo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.debugInfo span {
+  padding: 4px 8px;
+  background: white;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.debugError {
+  padding: 12px;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: var(--radius-sm);
+  color: #856404;
+  word-break: break-word;
+}
+
+.debugHint {
+  padding: 12px;
+  background: #e7f3ff;
+  border: 1px solid #b8daff;
+  border-radius: var(--radius-sm);
+  color: #004085;
+}
+
+.debugHint p {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.debugMessagePreview {
+  padding: 12px;
+  background: white;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.debugMessagePreview p {
+  margin: 4px 0;
+  word-break: break-word;
+}
+
+.debugMessagePreview strong {
+  color: #495057;
+  margin-right: 8px;
+}

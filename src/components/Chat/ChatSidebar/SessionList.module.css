@@ -1,0 +1,91 @@
+/* src/components/Chat/ChatSidebar/SessionList.module.css */
+
+.sessionList {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-sm);
+}
+
+.sessionGroup {
+  margin-bottom: var(--spacing-md);
+}
+
+.sessionGroupLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-gray-400);
+  text-transform: uppercase;
+  padding: 4px 12px;
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+
+.sessionItem {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  margin-bottom: 4px;
+  position: relative;
+  transition: background var(--transition-base);
+}
+
+.sessionItem:hover {
+  background: var(--color-gray-100);
+}
+
+.sessionItem.active {
+  background: var(--color-gray-200);
+}
+
+.sessionItem.streamingDisabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.sessionName {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 24px;
+}
+
+.sessionDate {
+  font-size: 11px;
+  color: var(--color-gray-400);
+  margin-top: 4px;
+}
+
+.sessionDelete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  background: var(--color-error);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--transition-base);
+}
+
+.sessionItem:hover .sessionDelete {
+  opacity: 1;
+}
+
+.sessionNameInput {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}

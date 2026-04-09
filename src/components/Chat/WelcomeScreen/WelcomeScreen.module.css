@@ -1,0 +1,45 @@
+/* src/components/Chat/WelcomeScreen/WelcomeScreen.module.css */
+
+.welcomeMessage {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--color-text-secondary);
+}
+
+.welcomeMessage h3 {
+  font-size: 24px;
+  margin-bottom: 12px;
+  color: var(--color-text-primary);
+}
+
+.modelWarning {
+  margin-top: 20px;
+  padding: 16px;
+  background: var(--color-warning);
+  background: linear-gradient(135deg, #fff3cd, #ffe8a1);
+  border: 1px solid #ffc107;
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.modelWarning p:first-child {
+  font-weight: 600;
+  color: #856404;
+  margin-bottom: 8px;
+}
+
+.modelWarning p:last-child {
+  color: #856404;
+  font-size: 13px;
+  margin: 0;
+}
+
+.modelParamsHint {
+  margin-top: 20px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  flex-wrap: wrap;
+}

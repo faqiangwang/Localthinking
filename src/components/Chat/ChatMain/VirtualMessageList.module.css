@@ -1,0 +1,34 @@
+/* src/components/Chat/ChatMain/VirtualMessageList.module.css */
+
+.messageList {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-lg);
+  padding-bottom: 40px;
+  /* 性能优化：启用硬件加速 */
+  transform: translateZ(0);
+  /* 性能优化：提示浏览器滚动性能优化 */
+  will-change: scroll-position;
+  /* 确保虚拟滚动容器有明确的高度 */
+  min-height: 0;
+}
+
+/* 自定义滚动条样式 */
+.messageList::-webkit-scrollbar {
+  width: 8px;
+}
+
+.messageList::-webkit-scrollbar-track {
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.messageList::-webkit-scrollbar-thumb {
+  background: var(--color-gray-300);
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-base);
+}
+
+.messageList::-webkit-scrollbar-thumb:hover {
+  background: var(--color-gray-400);
+}

@@ -1,0 +1,118 @@
+/* src/styles/reset.css */
+/* 样式重置 - 现代化 CSS Reset */
+
+/* 1. 使用更现代的盒模型 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* 2. 移除默认 margin */
+* {
+  margin: 0;
+  padding: 0;
+}
+
+/* 3. 改善媒体元素的默认样式 */
+img,
+picture,
+video,
+canvas,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* 4. 改善表单元素的默认样式 */
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* 5. 移除列表的默认样式 */
+ul,
+ol {
+  list-style: none;
+}
+
+/* 6. 避免文字收缩 */
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  overflow-wrap: break-word;
+}
+
+/* 7. 改善链接的默认样式 */
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+/* 8. 改善按钮的默认样式 */
+button {
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+/* 9. 移除 textarea 的默认 resize */
+textarea {
+  resize: vertical;
+}
+
+/* 10. 改善表格的默认样式 */
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+/* 11. 设置 HTML5 元素为 block */
+article,
+aside,
+details,
+figcaption,
+figure,
+footer,
+header,
+hgroup,
+main,
+menu,
+nav,
+section,
+summary {
+  display: block;
+}
+
+/* 12. 隐藏 audio 的默认控件 */
+audio:not([controls]) {
+  display: none;
+}
+
+/* 13. 改善隐藏元素的可见性 */
+[hidden] {
+  display: none !important;
+}
+
+/* 14. 避免文本溢出 */
+pre,
+code,
+kbd,
+samp {
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 15. 改善选中文本的样式 */
+::selection {
+  background: var(--color-primary);
+  color: white;
+}

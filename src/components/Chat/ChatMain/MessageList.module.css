@@ -1,0 +1,14 @@
+/* src/components/Chat/ChatMain/MessageList.module.css */
+
+.messageList {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-lg);
+  padding-bottom: 40px;
+  /* 性能优化：启用硬件加速 */
+  transform: translateZ(0);
+  /* 性能优化：提示浏览器滚动性能优化 */
+  will-change: scroll-position;
+  /* 确保容器有明确的高度 */
+  min-height: 0;
+}
