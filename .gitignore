@@ -41,6 +41,7 @@ src-tauri/Cargo.lock
 # Documentation files
 *.md
 !README.md
+!docs/**/*.md
 
 # Build scripts
 *.ps1
