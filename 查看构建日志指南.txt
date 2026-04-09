@@ -1,0 +1,32 @@
+如何查看GitHub Actions构建失败的具体错误：
+
+方法1：查看Actions页面
+1. 访问：https://github.com/faqiangwang/Localthinking/actions
+2. 点击最新的 "Build and Release" workflow run
+3. 展开失败的job（红色的×）
+4. 查看错误信息
+5. 找到具体失败的步骤
+6. 截图或复制错误日志
+
+方法2：直接查看日志
+1. 在Actions页面，点击失败的job
+2. 点击上方的 "Run logs" 或 "查看日志"
+3. 搜索 "Error" 或 "Failed" 关键词
+4. 复制错误信息
+
+方法3：使用GitHub CLI
+gh run view [run-id] --log-failed
+
+常见的Linux构建错误：
+- 依赖安装失败：apt-get install ...
+- 构建超时：超过时间限制
+- Rust编译错误：cargo build ...
+- Node.js错误：npm install ...
+
+常见的macOS构建错误：
+- OpenSSL路径错误
+- 证书签名错误
+- Rust编译错误
+- brew安装失败
+
+请查看具体的错误日志后，将错误信息发给我，我会针对性地修复！

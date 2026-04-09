@@ -1,0 +1,189 @@
+name: Diagnose Build Issues
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose-linux:
+    runs-on: ubuntu-22.04
+    outputs:
+      errors: ${{ steps.check-linux.outputs.errors }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Check system info
+        run: |
+          echo "=== System Information ==="
+          echo "OS: $(uname -a)"
+          echo "Disk space:"
+          df -h
+          echo "Memory:"
+          free -h
+          echo "CPU:"
+          nproc
+          echo "=== Rust ==="
+          rustc --version
+          cargo --version
+          echo "=== Node ==="
+          node --version
+          npm --version
+
+      - name: Install system dependencies
+        id: check-linux
+        continue-on-error: true
+        run: |
+          echo "=== Installing dependencies ==="
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev 2>&1 | tee /tmp/apt.log
+          echo "=== Install result: $? ==="
+
+      - name: Install frontend dependencies
+        run: |
+          echo "=== Installing frontend deps ==="
+          npm ci 2>&1 | tee /tmp/npm.log
+          echo "=== Install result: $? ==="
+
+      - name: Check Tauri CLI
+        run: |
+          echo "=== Checking Tauri CLI ==="
+          npx tauri --version || echo "Tauri CLI not found"
+          echo "=== Checking tauri.conf.json ==="
+          cat src-tauri/tauri.conf.json || echo "tauri.conf.json not found"
+
+      - name: Try dry run
+        continue-on-error: true
+        run: |
+          echo "=== Trying dry run ==="
+          npx tauri info --target x86_64-unknown-linux-gnu 2>&1 | tee /tmp/tauri-info.log
+          echo "=== Dry run result: $? ==="
+
+      - name: Collect errors
+        id: collect-errors
+        run: |
+          echo "=== Checking logs ==="
+          echo "=== APT log ==="
+          [ -f /tmp/apt.log ] && cat /tmp/apt.log || echo "No apt log"
+          echo "=== NPM log ==="
+          [ -f /tmp/npm.log ] && cat /tmp/npm.log || echo "No npm log"
+          echo "=== Tauri info log ==="
+          [ -f /tmp/tauri-info.log ] && cat /tmp/tauri-info.log || echo "No tauri info log"
+
+      - name: Generate error summary
+        id: check-linux
+        run: |
+          echo "errors=FAILED" >> $GITHUB_OUTPUT
+          if [ -f /tmp/apt.log ]; then
+            echo "APT install failed" >> $GITHUB_OUTPUT
+          fi
+          if [ -f /tmp/npm.log ] && grep -q "error" /tmp/npm.log; then
+            echo "NPM install failed" >> $GITHUB_OUTPUT
+          fi
+          if [ -f /tmp/tauri-info.log ] && grep -q "error" /tmp/tauri-info.log; then
+            echo "Tauri info failed" >> $GITHUB_OUTPUT
+          fi
+
+  diagnose-macos:
+    runs-on: macos-13
+    outputs:
+      errors: ${{ steps.check-macos.outputs.errors }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Check system info
+        run: |
+          echo "=== System Information ==="
+          sw_vers
+          echo "Disk space:"
+          df -h
+          echo "Memory:"
+          vm_stat
+          echo "CPU:"
+          sysctl -n machdep.cpu.thread_count
+          echo "=== Rust ==="
+          rustc --version
+          cargo --version
+          echo "=== Node ==="
+          node --version
+          npm --version
+
+      - name: Install dependencies
+        id: check-macos
+        continue-on-error: true
+        run: |
+          echo "=== Installing dependencies ==="
+          brew install openssl@3 2>&1 | tee /tmp/brew.log
+          echo "=== Install result: $? ==="
+
+      - name: Install frontend dependencies
+        run: |
+          echo "=== Installing frontend deps ==="
+          npm ci 2>&1 | tee /tmp/npm.log
+          echo "=== Install result: $? ==="
+
+      - name: Check Tauri CLI
+        run: |
+          echo "=== Checking Tauri CLI ==="
+          npx tauri --version || echo "Tauri CLI not found"
+          echo "=== Checking tauri.conf.json ==="
+          cat src-tauri/tauri.conf.json || echo "tauri.conf.json not found"
+
+      - name: Try dry run
+        continue-on-error: true
+        run: |
+          echo "=== Trying dry run ==="
+          npx tauri info --target x86_64-apple-darwin 2>&1 | tee /tmp/tauri-info.log
+          echo "=== Dry run result: $? ==="
+
+      - name: Collect errors
+        id: collect-errors
+        run: |
+          echo "=== Checking logs ==="
+          echo "=== Brew log ==="
+          [ -f /tmp/brew.log ] && cat /tmp/brew.log || echo "No brew log"
+          echo "=== NPM log ==="
+          [ -f /tmp/npm.log ] && cat /tmp/npm.log || echo "No npm log"
+          echo "=== Tauri info log ==="
+          [ -f /tmp/tauri-info.log ] && cat /tmp/tauri-info.log || echo "No tauri info log"
+
+      - name: Generate error summary
+        id: check-macos
+        run: |
+          echo "errors=FAILED" >> $GITHUB_OUTPUT
+          if [ -f /tmp/brew.log ] && grep -q "Error" /tmp/brew.log; then
+            echo "Brew install failed" >> $GITHUB_OUTPUT
+          fi
+          if [ -f /tmp/npm.log ] && grep -q "error" /tmp/npm.log; then
+            echo "NPM install failed" >> $ITHUB_OUTPUT
+          fi
+          if [ -f /tmp/tauri-info.log ] && grep -q "error" /tmp/tauri-info.log; then
+            echo "Tauri info failed" >> $GITHUB_OUTPUT
+          fi
