@@ -17,18 +17,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-aarch64'
-            os: macos-latest
-            target: aarch64-apple-darwin
-          - platform: 'macos-x86_64'
-            os: macos-latest
-            target: x86_64-apple-darwin
-          - platform: 'linux-x86_64'
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          # Windows - 优先构建，用户最多
           - platform: 'windows-x86_64'
             os: windows-latest
             target: x86_64-pc-windows-msvc
+
+          # Linux - 暂时禁用，构建失败
+          # - platform: 'linux-x86_64'
+          #   os: ubuntu-latest
+          #   target: x86_64-unknown-linux-gnu
+
+          # macOS - 需要代码签名证书，暂时禁用
+          # - platform: 'macos-x86_64'
+          #   os: macos-latest
+          #   target: x86_64-apple-darwin
+          # - platform: 'macos-aarch64'
+          #   os: macos-latest
+          #   target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.os }}
 
@@ -47,32 +52,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-1 \
-            libappindicator3-1
-
-      - name: Install dependencies (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          brew update
-          brew install openssl@3 readline
-          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> $GITHUB_ENV
-
       - name: Install frontend dependencies
         run: npm ci
 
@@ -88,9 +67,6 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: npm run tauri build -- --target ${{ matrix.target }}
 
       - name: Upload artifacts
@@ -125,12 +101,6 @@ jobs:
           draft: true
           prerelease: false
           files: |
-            artifacts/bundle-macos-aarch64/**/*.dmg
-            artifacts/bundle-macos-aarch64/**/*.app.tar.gz
-            artifacts/bundle-macos-x86_64/**/*.dmg
-            artifacts/bundle-macos-x86_64/**/*.app.tar.gz
-            artifacts/bundle-linux-x86_64/**/*.AppImage
-            artifacts/bundle-linux-x86_64/**/*.deb
             artifacts/bundle-windows-x86_64/**/*.msi
             artifacts/bundle-windows-x86_64/**/*.exe
         env:
