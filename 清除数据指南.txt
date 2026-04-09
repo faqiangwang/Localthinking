@@ -1,0 +1,30 @@
+如何清除旧的会话数据以使用新的系统提示词：
+
+方法1：在应用中清除
+1. 启动应用
+2. 点击左侧"设置"
+3. 滚动到底部
+4. 点击"🔄 重置所有会话"按钮
+5. 确认重置
+6. 应用会自动重启
+
+方法2：手动清除浏览器数据
+1. 打开应用
+2. 按F12打开开发者工具
+3. 进入"Application"或"应用"标签
+4. 左侧找到"Local Storage"
+5. 删除以下键：
+   - localmind_sessions
+   - localmind_active_session
+6. 刷新页面（F5）
+
+方法3：使用命令清除（需要先停止应用）
+运行以下命令：
+cd D:\HuaweiMoveData\Users\wangfaqiang\Desktop\kaifaxiangmu\Cursor\Local-mind
+node -e "localStorage.clear(); console.log('已清除所有数据');"
+
+清除后，应用会使用新的、更简单的提示词格式：
+- "思考：" 开头表示思考过程
+- "回答：" 开头表示最终答案
+
+这个格式更简单，小模型更容易理解和遵循。

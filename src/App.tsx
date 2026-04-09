@@ -41,7 +41,7 @@ function App() {
     <div className="app">
       <nav className="sidebar">
         <div className="app-title">
-          <h1>LM</h1>
+          <h1>L T</h1>
         </div>
 
         {/* 主题切换按钮 */}
