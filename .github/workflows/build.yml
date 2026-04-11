@@ -1,236 +1,86 @@
-name: Build and Release
+name: Build Artifacts
 
 on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
 jobs:
-  # ========================================
-  # 第一步：构建 Windows
-  # ========================================
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+
+          - os: macos-13
+            target: x86_64-apple-darwin
+            name: macos-x64
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install Rust
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri application (Windows)
-        id: build-windows
-        continue-on-error: true
-        run: |
-          echo "Starting Tauri build for Windows..."
-          npm run tauri build -- --target x86_64-pc-windows-msvc 2>&1 | tee build.log
-          exit ${PIPESTATUS[0]}
-        env:
-          TAURI_BUNDLE_SKIP_SIGNING: 'true'
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-windows
-          path: build.log
-          if-no-files-found: ignore
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: bundle-windows-x86_64
-          path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
-            !src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/.*
-
-  # ========================================
-  # 第二步：构建 Linux（等待Windows完成）
-  # ========================================
-  build-linux:
-    needs: build-windows
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Install dependencies
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.0-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri application (Linux)
-        id: build-linux
-        continue-on-error: true
-        run: |
-          echo "Starting Tauri build for Linux..."
-          npm run tauri build -- --target x86_64-unknown-linux-gnu 2>&1 | tee build.log
-          exit ${PIPESTATUS[0]}
-        env:
-          TAURI_BUNDLE_SKIP_SIGNING: 'true'
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-linux
-          path: build.log
-          if-no-files-found: ignore
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: bundle-linux-x86_64
-          path: |
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/
-            !src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/.*
-
-  # ========================================
-  # 第三步：构建 macOS（等待Linux完成）
-  # ========================================
-  build-macos:
-    needs: build-linux
-    runs-on: macos-latest
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
+      - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
+          cache: npm
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - name: Install dependencies
-        run: |
-          brew install openssl@3
-          echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
-
-      - name: Install frontend dependencies
+      - name: Install frontend deps
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri application (macOS)
-        id: build-macos
-        continue-on-error: true
+      - name: Build Tauri app
+        shell: bash
         run: |
-          echo "Starting Tauri build for macOS..."
-          npm run tauri build -- --target x86_64-apple-darwin 2>&1 | tee build.log
-          exit ${PIPESTATUS[0]}
-        env:
-          TAURI_BUNDLE_SKIP_SIGNING: 'true'
-          APPLE_SIGNING_IDENTITY: '-'
-          APPLE_TEAM_ID: '-'
+          set -o pipefail
+          npm run tauri build -- --target "${{ matrix.target }}" 2>&1 | tee build.log
 
-      - name: Upload build log on failure
-        if: failure()
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-macos
+          name: build-log-${{ matrix.name }}
           path: build.log
           if-no-files-found: ignore
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload bundle artifacts
         if: success()
+        uses: actions/upload-artifact@v4
         with:
-          name: bundle-macos-x86_64
+          name: bundle-${{ matrix.name }}
           path: |
-            src-tauri/target/x86_64-apple-darwin/release/bundle/
-            !src-tauri/target/x86_64-apple-darwin/release/bundle/**/.*
-            !src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.dSYM/**
-
-  # ========================================
-  # 最后一步：创建Release（仅在tag时）
-  # ========================================
-  release:
-    needs: [build-windows, build-linux, build-macos]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: true
-          prerelease: false
-          files: |
-            artifacts/bundle-windows-x86_64/**/*.msi
-            artifacts/bundle-windows-x86_64/**/*.exe
-            artifacts/bundle-linux-x86_64/**/*.AppImage
-            artifacts/bundle-linux-x86_64/**/*.deb
-            artifacts/bundle-macos-x86_64/**/*.dmg
-            artifacts/bundle-macos-x86_64/**/*.app.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            src-tauri/target/${{ matrix.target }}/release/bundle/
+            !src-tauri/target/${{ matrix.target }}/release/bundle/**/.*
+            !src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dSYM/**
