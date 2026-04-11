@@ -33,7 +33,8 @@ pub fn get_virtual_memory_info() -> Result<VirtualMemoryInfo, String> {
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
             r#"
             $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
@@ -79,7 +80,11 @@ pub fn get_virtual_memory_info() -> Result<VirtualMemoryInfo, String> {
         total_physical_mb: ps_output.total,
         available_physical_mb: ps_output.available,
         current_paging_file_mb: 0, // 简化：不再获取这个
-        paging_file_path: if ps_output.paging_enabled { "自动管理".to_string() } else { "手动".to_string() },
+        paging_file_path: if ps_output.paging_enabled {
+            "自动管理".to_string()
+        } else {
+            "手动".to_string()
+        },
         paging_enabled: ps_output.paging_enabled,
     })
 }
@@ -195,9 +200,7 @@ pub fn enable_auto_virtual_memory() -> Result<VirtualMemorySetResult, String> {
 
 /// 检查是否具有管理员权限
 fn check_admin_privilege() -> bool {
-    let output = Command::new("net")
-        .args(["session"])
-        .output();
+    let output = Command::new("net").args(["session"]).output();
 
     match output {
         Ok(o) => o.status.success(),

@@ -12,3 +12,17 @@
   /* 确保容器有明确的高度 */
   min-height: 0;
 }
+
+.highlighted {
+  animation: highlightPulse 2s ease-in-out;
+}
+
+@keyframes highlightPulse {
+  0%,
+  100% {
+    background: transparent;
+  }
+  50% {
+    background: rgba(0, 122, 255, 0.1);
+  }
+}

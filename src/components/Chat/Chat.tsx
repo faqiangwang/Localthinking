@@ -2,7 +2,6 @@
 // 聊天容器组件（重构后）
 
 import { useState, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from '../../store';
 import { useModel } from '../../hooks/useModel';
 import { useChat } from '../../hooks/useChat';
@@ -13,7 +12,7 @@ import styles from './Chat.module.css';
 
 export function Chat() {
   const { settings } = useSettingsStore();
-  const { modelLoaded, loading: modelLoading, error: modelError } = useModel();
+  const { modelLoaded, modelPath, loading: modelLoading, error: modelError } = useModel();
   const {
     sessions,
     activeSession,
@@ -28,13 +27,21 @@ export function Chat() {
     switchSession,
     deleteSession,
     renameSession,
-  } = useChat(settings.system_prompt);
+  } = useChat(settings.system_prompt, settings.model_params);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const error = localError || chatError;
+
+  const stopStreamingIfNeeded = useCallback(async () => {
+    if (!streaming) {
+      return;
+    }
+
+    await stop();
+  }, [stop, streaming]);
 
   // 处理发送消息
   const handleSend = useCallback(
@@ -55,35 +62,26 @@ export function Chat() {
 
   // 处理新建会话
   const handleNewSession = useCallback(async () => {
-    // 如果正在流式输出，先停止
-    if (streaming) {
-      await invoke('stop_generation').catch(() => {});
-    }
+    await stopStreamingIfNeeded();
     createSession();
-  }, [streaming, createSession]);
+  }, [createSession, stopStreamingIfNeeded]);
 
   // 处理切换会话
   const handleSwitchSession = useCallback(
     async (sessionId: string) => {
-      // 如果正在流式输出，先停止
-      if (streaming) {
-        await invoke('stop_generation').catch(() => {});
-      }
+      await stopStreamingIfNeeded();
       switchSession(sessionId);
     },
-    [streaming, switchSession]
+    [stopStreamingIfNeeded, switchSession]
   );
 
   // 处理删除会话
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
-      // 如果正在流式输出，先停止
-      if (streaming) {
-        await invoke('stop_generation').catch(() => {});
-      }
+      await stopStreamingIfNeeded();
       deleteSession(sessionId);
     },
-    [streaming, deleteSession]
+    [deleteSession, stopStreamingIfNeeded]
   );
 
   return (
@@ -110,6 +108,7 @@ export function Chat() {
         modelLoaded={modelLoaded}
         modelLoading={modelLoading}
         modelError={modelError}
+        modelParams={settings.model_params}
         tokPerSec={tokPerSec}
         tokenCount={tokenCount}
         onNewSession={handleNewSession}
@@ -122,8 +121,11 @@ export function Chat() {
       {/* 调试面板 */}
       {showDebug && (
         <DebugPanel
+          activeSessionId={activeSession?.id ?? null}
           modelLoaded={modelLoaded}
           modelLoading={modelLoading}
+          modelPath={modelPath ?? null}
+          modelParams={settings.model_params}
           streaming={streaming}
           messages={messages}
           tokPerSec={tokPerSec}

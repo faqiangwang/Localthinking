@@ -1,8 +1,9 @@
 // src-tauri/src/monitoring.rs
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// 性能指标
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PerformanceMetrics {
     /// 推理开始时间
@@ -23,6 +24,7 @@ pub struct PerformanceMetrics {
     pub gpu_enabled: bool,
 }
 
+#[allow(dead_code)]
 impl PerformanceMetrics {
     pub fn new(threads: u32, context_size: u32, gpu_enabled: bool) -> Self {
         Self {
@@ -48,7 +50,7 @@ impl PerformanceMetrics {
     /// 获取推理耗时（毫秒）
     pub fn duration_ms(&self) -> f64 {
         let end = self.end_time.unwrap_or_else(Instant::now);
-        end.duration_since(self.start_time).as_millis() as f64
+        end.duration_since(self.start_time).as_secs_f64() * 1000.0
     }
 
     /// 计算推理速度（tokens/秒）
@@ -95,11 +97,13 @@ impl PerformanceMetrics {
 }
 
 /// 性能监控器
+#[allow(dead_code)]
 pub struct PerformanceMonitor {
     metrics: Arc<Mutex<Vec<PerformanceMetrics>>>,
     max_history: usize,
 }
 
+#[allow(dead_code)]
 impl PerformanceMonitor {
     pub fn new(max_history: usize) -> Self {
         Self {
@@ -133,7 +137,10 @@ impl PerformanceMonitor {
             if format!("{:?}", metrics.start_time) == *id {
                 drop(history);
                 let mut metrics = self.metrics.lock().unwrap();
-                if let Some(m) = metrics.iter_mut().find(|m| format!("{:?}", m.start_time) == *id) {
+                if let Some(m) = metrics
+                    .iter_mut()
+                    .find(|m| format!("{:?}", m.start_time) == *id)
+                {
                     m.finish(prompt_tokens, completion_tokens);
                     eprintln!("[性能] {}", m.report());
                 }
@@ -149,7 +156,8 @@ impl PerformanceMonitor {
             return 0.0;
         }
 
-        let speeds: Vec<f64> = history.iter()
+        let speeds: Vec<f64> = history
+            .iter()
             .filter(|m| m.end_time.is_some())
             .map(|m| m.tokens_per_second())
             .collect();
@@ -164,7 +172,11 @@ impl PerformanceMonitor {
     /// 获取最近的性能指标
     pub fn get_recent_metrics(&self, count: usize) -> Vec<PerformanceMetrics> {
         let history = self.metrics.lock().unwrap();
-        let start = if history.len() > count { history.len() - count } else { 0 };
+        let start = if history.len() > count {
+            history.len() - count
+        } else {
+            0
+        };
         history[start..].to_vec()
     }
 
@@ -176,10 +188,12 @@ impl PerformanceMonitor {
 }
 
 /// 系统资源监控
+#[allow(dead_code)]
 pub struct ResourceMonitor {
     last_check: Arc<Mutex<Instant>>,
 }
 
+#[allow(dead_code)]
 impl ResourceMonitor {
     pub fn new() -> Self {
         Self {
@@ -192,13 +206,14 @@ impl ResourceMonitor {
         // 使用 sysinfo crate 获取内存信息
         // 这里简化为返回估算值
         MemoryInfo {
-            total_mb: 16384,  // 16GB
-            used_mb: 8192,    // 8GB
+            total_mb: 16384, // 16GB
+            used_mb: 8192,   // 8GB
             available_mb: 8192,
         }
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MemoryInfo {
     pub total_mb: u64,
@@ -209,10 +224,12 @@ pub struct MemoryInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_performance_metrics() {
         let mut metrics = PerformanceMetrics::new(8, 2048, false);
+        std::thread::sleep(Duration::from_millis(1));
         metrics.finish(100, 200);
 
         assert_eq!(metrics.total_tokens, 300);

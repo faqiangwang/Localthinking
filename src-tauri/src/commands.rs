@@ -1,20 +1,80 @@
 // src-tauri/src/commands.rs
-use tauri::{Emitter, State, Window};
+use crate::api::ApiServerManager;
 use crate::backend::{InferenceBackend, Message};
-use crate::engine::LlamaCppEngine;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use crate::cache::{build_generation_cache_params_key, InferenceCache};
+use crate::engine::{InferenceParams, LlamaCppEngine};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tauri::{Emitter, State, Window};
 use tokio::sync::mpsc;
 
 pub type EngineState = Arc<Mutex<LlamaCppEngine>>;
 
-// 推理参数常量
-const DEFAULT_TEMPERATURE: f32 = 0.7;
-const DEFAULT_TOP_P: f32 = 0.9;
-const DEFAULT_REPEAT_PENALTY: f32 = 1.1;
-const REPEAT_PENALTY_HISTORY: u32 = 32;
-const MAX_TOKENS_MIN: i32 = 32;
-const MAX_TOKENS_CHAT_LIMIT: i32 = 512;
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChatGenerationParams {
+    temperature: f32,
+    top_p: f32,
+    max_tokens: u32,
+    ctx_size: u32,
+    repeat_penalty: f32,
+}
+
+#[derive(serde::Serialize)]
+struct ChatTokenEvent {
+    request_id: String,
+    content: String,
+    n_tokens: usize,
+    tok_per_sec: f64,
+}
+
+#[derive(serde::Serialize)]
+struct ChatDoneEvent {
+    request_id: String,
+    n_tokens: usize,
+    tok_per_sec: f64,
+}
+
+#[derive(serde::Serialize)]
+struct ChatErrorEvent {
+    request_id: String,
+    error: String,
+    n_tokens: usize,
+    tok_per_sec: f64,
+}
+
+fn calculate_tok_per_sec(started_at: Instant, n_tokens: usize) -> f64 {
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed > 0.0 {
+        n_tokens as f64 / elapsed
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_chat_generation_params(params: ChatGenerationParams) -> (InferenceParams, u32) {
+    let temperature = params.temperature.clamp(0.0, 2.0);
+    let top_p = if params.top_p <= 0.0 {
+        InferenceParams::default().top_p
+    } else {
+        params.top_p.clamp(0.0, 1.0)
+    };
+    let max_tokens = params.max_tokens.max(1).min(i32::MAX as u32) as i32;
+    let ctx_size = params.ctx_size.max(64);
+    let repeat_penalty = params.repeat_penalty.clamp(1.0, 2.0);
+
+    (
+        InferenceParams {
+            temperature,
+            top_p,
+            top_k: InferenceParams::default().top_k,
+            max_tokens,
+            repeat_penalty,
+        },
+        ctx_size,
+    )
+}
 
 // 日志宏，避免生产环境中大量调试输出
 #[cfg(feature = "debug")]
@@ -24,7 +84,9 @@ macro_rules! log_debug {
 
 #[cfg(not(feature = "debug"))]
 macro_rules! log_debug {
-    ($($arg:tt)*) => { () };
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 #[tauri::command]
@@ -40,11 +102,10 @@ pub async fn load_model(path: String, state: State<'_, EngineState>) -> Result<(
     }
 
     // 处理可能的 poisoned lock（由之前的 panic 导致）
-    let mut engine = state.lock()
-        .unwrap_or_else(|poisoned| {
-            eprintln!("[WARN] 检测到之前的任务失败，正在恢复状态...");
-            poisoned.into_inner()
-        });
+    let mut engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] 检测到之前的任务失败，正在恢复状态...");
+        poisoned.into_inner()
+    });
 
     engine.set_model_name_from_path(&path);
 
@@ -81,6 +142,10 @@ pub async fn load_model(path: String, state: State<'_, EngineState>) -> Result<(
         }
     });
 
+    if result.is_ok() {
+        engine.set_model_path(&path);
+    }
+
     match &result {
         Ok(_) => log_debug!("[DEBUG] 模型加载成功"),
         Err(e) => eprintln!("[ERROR] 模型加载失败: {}", e),
@@ -91,338 +156,180 @@ pub async fn load_model(path: String, state: State<'_, EngineState>) -> Result<(
 #[tauri::command]
 pub async fn chat_stream(
     messages: Vec<Message>,
+    request_id: String,
+    params: ChatGenerationParams,
     window: Window,
     state: State<'_, EngineState>,
+    cache: State<'_, InferenceCache>,
 ) -> Result<(), String> {
     eprintln!("[INFO] chat_stream 开始，收到 {} 条消息", messages.len());
 
-    // 首先检查模型是否已加载（处理可能的 poisoned lock）
-    let (model_loaded, model_name) = {
-        let engine = state.lock()
-            .unwrap_or_else(|poisoned| {
-                eprintln!("[WARN] 检测到之前的任务失败，正在恢复...");
-                poisoned.into_inner()
-            });
-        let loaded = engine.is_model_loaded();
-        let name = engine.model_name.clone();
-        (loaded, name)
+    // 检查模型是否已加载
+    let (loaded, fmt, model_identity) = {
+        let engine = state.lock().unwrap_or_else(|p| p.into_inner());
+        (
+            engine.is_model_loaded(),
+            engine.fmt.clone(),
+            engine
+                .model_path
+                .clone()
+                .unwrap_or_else(|| engine.model_name.clone()),
+        )
     };
 
-    eprintln!("[INFO] 模型状态: loaded={}, name={}", model_loaded, model_name);
-
-    if !model_loaded {
+    if !loaded {
         let msg = "模型未加载，请先选择并加载模型".to_string();
-        eprintln!("[WARN] {}", msg);
-        let _ = window.emit("chat://error", &msg);
+        let _ = window.emit(
+            "chat://error",
+            &ChatErrorEvent {
+                request_id,
+                error: msg.clone(),
+                n_tokens: 0,
+                tok_per_sec: 0.0,
+            },
+        );
         return Err(msg);
     }
 
-    let (model, backend, n_threads, ctx_size, fmt, abort_flag) = {
-        let engine = state.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let model = engine.model.clone();
-        let backend = engine.backend.clone();
-        let n_threads = engine.n_threads;
-        let ctx_size = engine.ctx_size;
-        let fmt = engine.fmt.clone();
-        let abort_flag = engine.abort_flag.clone();
-        (model, backend, n_threads, ctx_size, fmt, abort_flag)
-    };
-
-    let prompt = crate::chat::build_prompt(&fmt, &messages);
-    eprintln!("[INFO] prompt 长度: {}", prompt.len());
-
-    // 恢复原始配置：使用完整的上下文范围
-    // 平衡性能和上下文长度：2048-4096 可以获得最佳性能
-    let final_ctx_size = ctx_size.clamp(2048, 4096);
-    let final_n_threads = n_threads.clamp(2, 16);
-    eprintln!("[INFO] 最终 ctx_size: {}, n_threads: {}", final_ctx_size, final_n_threads);
-
-    // 创建通道用于传递 token，使用较小的缓冲
-    let (tx, mut rx) = mpsc::channel::<Result<String, String>>(10);
+    let started_at = Instant::now();
+    let (tx, mut rx) = mpsc::channel::<String>(32);
     let tx_clone = tx.clone();
 
-    eprintln!("[INFO] 启动推理任务...");
+    let engine_for_task = state.inner().clone();
+    let msgs = messages.clone();
+    let (inference_params, ctx_size) = sanitize_chat_generation_params(params);
+    let prompt = crate::chat::build_prompt(&fmt, &messages);
+    let cache_params =
+        build_generation_cache_params_key(&model_identity, ctx_size, &inference_params);
 
-    // Run in blocking task with panic protection
-    let mut handle = tokio::task::spawn_blocking(move || {
-        eprintln!("[INFO] spawn_blocking 开始");
-
-        // 使用 catch_unwind 捕获任何 panic
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            run_inference(&model, &backend, final_n_threads, final_ctx_size, &prompt, &tx_clone, &abort_flag)
-        }));
-
-        match result {
-            Ok(Ok(())) => {
-                eprintln!("[INFO] 推理正常完成");
-            }
-            Ok(Err(e)) => {
-                eprintln!("[ERROR] 推理出错: {}", e);
-                let _ = tx_clone.blocking_send(Err(e));
-            }
-            Err(panic_info) => {
-                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    format!("推理panic: {}", s)
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    format!("推理panic: {}", s)
-                } else {
-                    "推理发生未知panic".to_string()
-                };
-                eprintln!("[ERROR] {}", msg);
-                let _ = tx_clone.blocking_send(Err(msg));
-            }
+    if let Some(cached) = cache.get(&prompt, &cache_params) {
+        if !cached.content.is_empty() {
+            let _ = window.emit(
+                "chat://token",
+                &ChatTokenEvent {
+                    request_id: request_id.clone(),
+                    content: cached.content,
+                    n_tokens: cached.token_count,
+                    tok_per_sec: 0.0,
+                },
+            );
         }
+
+        let _ = window.emit(
+            "chat://done",
+            &ChatDoneEvent {
+                request_id,
+                n_tokens: cached.token_count,
+                tok_per_sec: 0.0,
+            },
+        );
+        return Ok(());
+    }
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut engine = engine_for_task.lock().unwrap_or_else(|p| p.into_inner());
+        engine.set_ctx_size(ctx_size);
+        engine.generate_stream_with_params(msgs, inference_params, move |token: String| {
+            let _ = tx_clone.blocking_send(token);
+        })
     });
+    drop(tx);
 
-    // 在异步上下文中接收 token 并发送给前端
-    eprintln!("[INFO] 开始接收 token...");
-    let mut _token_count = 0;
-
-    // 使用 select! 处理任务完成和接收
-    loop {
-        tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Some(Ok(s)) if s.is_empty() => {
-                        eprintln!("[INFO] 完成信号，发送 done");
-                        let _ = window.emit("chat://done", ());
-                        break;
-                    }
-                    Some(Ok(s)) => {
-                        _token_count += 1;
-                        eprintln!("[INFO] 发送 token #{}: {}", _token_count, s.trim());
-                        let _ = window.emit("chat://token", &s);
-                    }
-                    Some(Err(e)) => {
-                        eprintln!("[ERROR] 推理错误: {}", e);
-                        let _ = window.emit("chat://error", &e);
-                        break;
-                    }
-                    None => {
-                        eprintln!("[INFO] 通道已关闭");
-                        break;
-                    }
-                }
-            }
-            result = &mut handle => {
-                match result {
-                    Ok(()) => {
-                        eprintln!("[INFO] 任务正常完成");
-                    }
-                    Err(e) => {
-                        eprintln!("[ERROR] 任务panic或被取消: {:?}", e);
-                        let _ = window.emit("chat://error", "推理任务异常终止");
-                    }
-                }
-                // 任务完成，退出循环（不需要重复处理token，上面的rx.recv()已经处理了）
-                break;
-            }
-        }
-    }
-    eprintln!("[INFO] chat_stream 完成，共发送 {} tokens", _token_count);
-
-    Ok(())
-}
-
-/// 执行推理的核心函数
-fn run_inference(
-    model: &Arc<Mutex<Option<Arc<llama_cpp_2::model::LlamaModel>>>>,
-    backend: &Arc<llama_cpp_2::llama_backend::LlamaBackend>,
-    n_threads: u32,
-    ctx_size: u32,
-    prompt: &str,
-    tx: &mpsc::Sender<Result<String, String>>,
-    abort_flag: &Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), String> {
-    // 重置中断标志
-    abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-
-    // 获取模型
-    let model_guard = model.lock().map_err(|e| e.to_string())?;
-    let model = model_guard.as_ref().ok_or("模型未加载")?;
-    let model = model.clone();
-    drop(model_guard);
-
-    eprintln!("[INFO] 正在创建上下文...");
-
-    // 创建上下文，使用安全的 NonZeroU32 处理
-    let n_ctx = std::num::NonZeroU32::new(ctx_size.max(64)).unwrap_or(std::num::NonZeroU32::MIN);
-
-    // 性能优化配置
-    // n_batch: 必须足够大以处理整个 prompt，设置为与 n_ctx 相同
-    // n_threads_batch: CPU-only 推理可以使用与主线程数相同的批处理线程
-    let ctx_params = llama_cpp_2::context::params::LlamaContextParams::default()
-        .with_n_ctx(Some(n_ctx))
-        .with_n_batch(n_ctx.get())  // 设置 n_batch 等于上下文大小
-        .with_n_threads(n_threads.max(1) as i32)
-        .with_n_threads_batch(n_threads.max(1) as i32);  // 使用全部线程进行批处理
-
-    let mut ctx = model.new_context(backend, ctx_params)
-        .map_err(|e| format!("无法创建推理上下文: {}", e))?;
-
-    log_debug!("[DEBUG] 上下文创建成功");
-
-    // Tokenize
-    let mut tokens = model.str_to_token(prompt, llama_cpp_2::model::AddBos::Never)
-        .map_err(|e| format!("无法将提示词转为 token: {}", e))?;
-
-    if tokens.is_empty() {
-        return Err("提示词为空".to_string());
-    }
-
-    log_debug!("[DEBUG] tokens 数量: {}", tokens.len());
-
-    // 智能截断：如果 tokens 超过上下文大小的 90%，保留最近的 tokens
-    // 为新生成的 token 预留至少 10% 的空间
-    let max_prompt_tokens = (ctx_size as f32 * 0.9) as usize;
-    if tokens.len() > max_prompt_tokens {
-        let truncated_count = tokens.len() - max_prompt_tokens;
-        eprintln!("[WARN] Prompt 过长 ({} tokens)，截断最早的 {} 个 tokens", tokens.len(), truncated_count);
-        tokens = tokens.into_iter().rev().take(max_prompt_tokens).collect::<Vec<_>>().into_iter().rev().collect();
-        eprintln!("[INFO] 截断后 tokens 数量: {}", tokens.len());
-    }
-
-    // 初始批次 - 使用简化的方式，让所有位置都能正确处理
-    let n_tokens = tokens.len();
-    let mut batch = llama_cpp_2::llama_batch::LlamaBatch::new(n_tokens, 1);
-
-    // 添加所有 tokens 到批次
-    for (i, &t) in tokens.iter().enumerate() {
-        // 只在最后一个位置设置 logits=true
-        let is_last = i == n_tokens - 1;
-        batch.add(t, i as i32, &[0], is_last)
-            .map_err(|e| format!("无法添加 token 到批次: {}", e))?;
-    }
-
-    log_debug!("[DEBUG] 初始批次创建完成，准备解码");
-    ctx.decode(&mut batch)
-        .map_err(|e| format!("初始解码失败: {}", e))?;
-
-    log_debug!("[DEBUG] 初始 decode 成功");
-
-    let mut sampler = llama_cpp_2::sampling::LlamaSampler::chain_simple([
-        llama_cpp_2::sampling::LlamaSampler::penalties(REPEAT_PENALTY_HISTORY as i32, DEFAULT_REPEAT_PENALTY, 0.0, 0.0),
-        llama_cpp_2::sampling::LlamaSampler::top_k(40),
-        llama_cpp_2::sampling::LlamaSampler::top_p(DEFAULT_TOP_P, 1),
-        llama_cpp_2::sampling::LlamaSampler::temp(DEFAULT_TEMPERATURE),
-        llama_cpp_2::sampling::LlamaSampler::dist(42),
-    ]);
-
-    let mut n_cur: i32 = n_tokens as i32;  // 当前序列长度（下一个要添加的位置），使用 i32 类型
     let mut token_count = 0;
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
-    let max_tokens = (ctx_size as i32).min(MAX_TOKENS_CHAT_LIMIT).max(MAX_TOKENS_MIN);
-    let start_time = std::time::Instant::now(); // 记录开始时间
-    let is_first_iteration = std::sync::atomic::AtomicBool::new(true);
+    let mut content = String::new();
 
-    log_debug!("[DEBUG] 开始生成循环, max_tokens: {}, n_cur初始值: {}", max_tokens, n_cur);
-
-    loop {
-        // 检查是否请求中断
-        if abort_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            log_debug!("[DEBUG] 用户中断推理");
-            break;
+    while let Some(token) = rx.recv().await {
+        if token.is_empty() {
+            continue;
         }
 
-        if token_count >= max_tokens {
-            log_debug!("[DEBUG] 达到最大 token 数: {}", max_tokens);
-            break;
-        }
-
-        // 确定采样位置
-        // 第一次迭代：从初始 batch 的最后一个位置采样（n_cur - 1）
-        // 后续迭代：从新 batch 的位置 0 采样（因为新 batch 只有一个 token）
-        let sample_pos = if is_first_iteration.load(std::sync::atomic::Ordering::SeqCst) {
-            (n_cur - 1).max(0)
-        } else {
-            0  // 新 batch 只有一个 token，索引为 0
-        };
-
-        log_debug!("[DEBUG] 从位置 {} 采样，当前序列长度 {}, 第一次迭代: {}",
-                   sample_pos, n_cur, is_first_iteration.load(std::sync::atomic::Ordering::SeqCst));
-
-        let token = sampler.sample(&ctx, sample_pos);
-        sampler.accept(token);
-
-        // 标记第一次迭代已完成
-        is_first_iteration.store(false, std::sync::atomic::Ordering::SeqCst);
-
-        if model.is_eog_token(token) {
-            log_debug!("[DEBUG] 检测到结束 token");
-            break;
-        }
-
-        let decoded_text = match model.token_to_piece(token, &mut decoder, true, None) {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        };
-
-        // 无论解码是否成功，都增加 token 计数
         token_count += 1;
+        content.push_str(&token);
+        let _ = window.emit(
+            "chat://token",
+            &ChatTokenEvent {
+                request_id: request_id.clone(),
+                content: token,
+                n_tokens: token_count,
+                tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+            },
+        );
+    }
 
-        if let Some(text) = decoded_text {
-            // 计算速度
-            let elapsed = start_time.elapsed().as_secs_f32().max(0.001);
-            let tok_per_sec = (token_count as f32 / elapsed * 10.0).round() / 10.0;
-
-            // 发送包含速度信息的 JSON 数据
-            let token_data = serde_json::json!({
-                "text": text,
-                "tok_per_sec": tok_per_sec,
-                "n_tokens": token_count,
-            });
-
-            if tx.blocking_send(Ok(token_data.to_string())).is_err() {
-                break;
+    match handle.await {
+        Ok(Ok(())) => {
+            if !content.is_empty() {
+                cache.set(&prompt, &cache_params, &content, token_count);
             }
+            let _ = window.emit(
+                "chat://done",
+                &ChatDoneEvent {
+                    request_id,
+                    n_tokens: token_count,
+                    tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                },
+            );
+            eprintln!("[INFO] chat_stream 完成，共发送 {} tokens", token_count);
+            Ok(())
         }
-
-        // 创建新批次并添加 token 到位置 n_cur
-        let mut next = llama_cpp_2::llama_batch::LlamaBatch::new(1, 1);
-        next.add(token, n_cur, &[0], true)
-            .map_err(|e| format!("无法添加下一个 token: {}", e))?;
-
-        log_debug!("[DEBUG] 解码新 token，位置 {}", n_cur);
-        ctx.decode(&mut next)
-            .map_err(|e| format!("解码失败: {}", e))?;
-
-        // 移动到下一个位置
-        n_cur += 1;
-
-        if n_cur as u32 >= ctx_size {
-            log_debug!("[DEBUG] 达到上下文限制");
-            break;
+        Ok(Err(error)) => {
+            let message = error.to_string();
+            let _ = window.emit(
+                "chat://error",
+                &ChatErrorEvent {
+                    request_id,
+                    error: message.clone(),
+                    n_tokens: token_count,
+                    tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                },
+            );
+            Err(message)
+        }
+        Err(error) => {
+            let message = format!("生成任务失败: {}", error);
+            let _ = window.emit(
+                "chat://error",
+                &ChatErrorEvent {
+                    request_id,
+                    error: message.clone(),
+                    n_tokens: token_count,
+                    tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                },
+            );
+            Err(message)
         }
     }
-    log_debug!("[DEBUG] 生成循环结束，共生成 {} tokens", token_count);
-
-    // 发送完成信号
-    tx.blocking_send(Ok(String::new())).ok();
-
-    Ok(())
 }
 
 /// 用户在设置页调整 CPU 线程数
 #[tauri::command]
 pub fn set_threads(n: u32, state: State<'_, EngineState>) -> Result<(), String> {
-    let mut engine = state.lock()
-        .unwrap_or_else(|poisoned| {
-            eprintln!("[WARN] set_threads: 检测到 poisoned lock，正在恢复...");
-            poisoned.into_inner()
-        });
+    let mut engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] set_threads: 检测到 poisoned lock，正在恢复...");
+        poisoned.into_inner()
+    });
     engine.set_threads(n);
+    Ok(())
+}
+
+/// 更新上下文大小
+#[tauri::command]
+pub fn set_context_size(size: u32, state: State<'_, EngineState>) -> Result<(), String> {
+    let mut engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] set_context_size: 检测到 poisoned lock，正在恢复...");
+        poisoned.into_inner()
+    });
+    engine.set_ctx_size(size);
     Ok(())
 }
 
 /// 获取系统信息
 #[tauri::command]
 pub fn system_info(state: State<'_, EngineState>) -> Result<serde_json::Value, String> {
-    let engine = state.lock()
-        .unwrap_or_else(|poisoned| {
-            eprintln!("[WARN] system_info: 检测到 poisoned lock，正在恢复...");
-            poisoned.into_inner()
-        });
+    let engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] system_info: 检测到 poisoned lock，正在恢复...");
+        poisoned.into_inner()
+    });
     Ok(engine.system_info())
 }
 
@@ -442,11 +349,10 @@ pub async fn download_model(
 /// 停止当前推理
 #[tauri::command]
 pub fn stop_generation(state: State<'_, EngineState>) -> Result<(), String> {
-    let engine = state.lock()
-        .unwrap_or_else(|poisoned| {
-            eprintln!("[WARN] stop_generation: 检测到 poisoned lock，正在恢复...");
-            poisoned.into_inner()
-        });
+    let engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] stop_generation: 检测到 poisoned lock，正在恢复...");
+        poisoned.into_inner()
+    });
     engine.stop();
     Ok(())
 }
@@ -466,8 +372,7 @@ pub fn delete_model_file(file_path: String) -> Result<(), String> {
     }
 
     // 删除文件
-    std::fs::remove_file(&file_path)
-        .map_err(|e| format!("删除文件失败: {}", e))?;
+    std::fs::remove_file(&file_path).map_err(|e| format!("删除文件失败: {}", e))?;
 
     eprintln!("[删除] 已删除模型文件: {}", file_path);
     Ok(())
@@ -483,45 +388,52 @@ pub struct ApiStatusResponse {
     pub base_url: String,
 }
 
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-
-/// 全局 API 服务器状态
-static API_ENABLED: AtomicBool = AtomicBool::new(true);
-static API_PORT: AtomicU16 = AtomicU16::new(8080);
-
 /// 获取 API 服务状态
 #[tauri::command]
-pub fn get_api_status() -> ApiStatusResponse {
-    let enabled = API_ENABLED.load(Ordering::SeqCst);
-    let port = API_PORT.load(Ordering::SeqCst);
+pub fn get_api_status(api_server: State<'_, ApiServerManager>) -> ApiStatusResponse {
+    let enabled = api_server.is_enabled();
+    let port = api_server.port();
     ApiStatusResponse {
         enabled,
         port,
-        running: enabled, // 简化：running = enabled
+        running: api_server.is_running(),
         base_url: format!("http://127.0.0.1:{}", port),
     }
 }
 
 /// 启用/禁用 API 服务
 #[tauri::command]
-pub fn set_api_enabled(enabled: bool) -> Result<(), String> {
-    API_ENABLED.store(enabled, Ordering::SeqCst);
-    Ok(())
+pub fn set_api_enabled(
+    enabled: bool,
+    api_server: State<'_, ApiServerManager>,
+    engine: State<'_, EngineState>,
+) -> Result<(), String> {
+    api_server.set_enabled(enabled);
+
+    if enabled {
+        api_server.restart(engine.inner().clone())
+    } else {
+        api_server.stop()
+    }
 }
 
 /// 设置 API 服务端口
 #[tauri::command]
-pub fn set_api_port(port: u16) -> Result<(), String> {
+pub fn set_api_port(
+    port: u16,
+    api_server: State<'_, ApiServerManager>,
+    engine: State<'_, EngineState>,
+) -> Result<(), String> {
     if port < 1024 {
         return Err("端口必须在 1024-65535 之间".to_string());
     }
-    API_PORT.store(port, Ordering::SeqCst);
-    Ok(())
-}
+    api_server.set_port(port);
 
-/// 获取 API 服务端口（供 lib.rs 使用）
-pub fn get_api_port() -> u16 {
-    API_PORT.load(Ordering::SeqCst)
+    if api_server.is_enabled() {
+        api_server.restart(engine.inner().clone())
+    } else {
+        Ok(())
+    }
 }
 
 // ============ 硬件检测与模型推荐命令 ============
@@ -536,7 +448,7 @@ pub fn get_hardware_info() -> serde_json::Value {
 /// 获取模型推荐（基于当前硬件）
 #[tauri::command]
 pub fn get_model_recommendations() -> serde_json::Value {
-    let hw   = crate::sysinfo::detect_hardware();
+    let hw = crate::sysinfo::detect_hardware();
     let recs = crate::recommender::recommend(&hw);
     serde_json::json!({
         "hardware":        hw,
@@ -547,26 +459,35 @@ pub fn get_model_recommendations() -> serde_json::Value {
 /// 扫描本地模型文件
 #[tauri::command]
 pub fn scan_models(state: State<'_, EngineState>) -> Vec<ScannedModel> {
-    let engine = state.lock()
-        .unwrap_or_else(|poisoned| {
-            eprintln!("[WARN] scan_models: 检测到 poisoned lock，正在恢复...");
-            poisoned.into_inner()
-        });
+    let engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] scan_models: 检测到 poisoned lock，正在恢复...");
+        poisoned.into_inner()
+    });
 
-    match engine.list_models() {
-        Ok(models) => {
-            models.into_iter().map(|m| ScannedModel {
-                name: m.name,
-                path: m.path,
-                size_gb: m.size_gb,
-                parameters: m.parameters,
-            }).collect()
-        }
-        Err(e) => {
-            eprintln!("[ERROR] 扫描模型失败: {}", e);
-            Vec::new()
+    let mut seen_paths = HashSet::new();
+    let mut scanned_models = Vec::new();
+
+    if let Ok(models) = engine.list_models() {
+        for model in models {
+            if seen_paths.insert(model.path.clone()) {
+                scanned_models.push(ScannedModel {
+                    name: model.name,
+                    path: model.path,
+                    size_gb: model.size_gb,
+                    parameters: model.parameters,
+                });
+            }
         }
     }
+
+    drop(engine);
+
+    for (directory, depth) in candidate_model_directories() {
+        collect_gguf_files(&directory, depth, &mut scanned_models, &mut seen_paths);
+    }
+
+    scanned_models.sort_by(|left, right| left.name.cmp(&right.name));
+    scanned_models
 }
 
 #[derive(serde::Serialize)]
@@ -577,22 +498,126 @@ pub struct ScannedModel {
     pub parameters: String,
 }
 
+fn candidate_model_directories() -> Vec<(PathBuf, usize)> {
+    let mut directories = Vec::new();
+
+    if let Some(home_dir) = dirs::home_dir() {
+        directories.push((home_dir.join("LocalMind").join("models"), 4));
+    }
+
+    if let Some(download_dir) = dirs::download_dir() {
+        directories.push((download_dir, 1));
+    }
+
+    if let Some(document_dir) = dirs::document_dir() {
+        directories.push((document_dir.join("LocalMind").join("models"), 4));
+    }
+
+    directories
+}
+
+fn collect_gguf_files(
+    directory: &Path,
+    remaining_depth: usize,
+    scanned_models: &mut Vec<ScannedModel>,
+    seen_paths: &mut HashSet<String>,
+) {
+    let read_dir = match std::fs::read_dir(directory) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return,
+    };
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+
+        if path.is_dir() {
+            if remaining_depth > 0 && should_descend(&path) {
+                collect_gguf_files(&path, remaining_depth - 1, scanned_models, seen_paths);
+            }
+            continue;
+        }
+
+        if !is_gguf_file(&path) {
+            continue;
+        }
+
+        let canonical_path = path.canonicalize().unwrap_or(path.clone());
+        let canonical_string = canonical_path.to_string_lossy().to_string();
+
+        if !seen_paths.insert(canonical_string.clone()) {
+            continue;
+        }
+
+        let size_gb = canonical_path
+            .metadata()
+            .map(|metadata| metadata.len() as f32 / 1024.0 / 1024.0 / 1024.0)
+            .unwrap_or(0.0);
+
+        let name = canonical_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or("unknown.gguf")
+            .to_string();
+
+        scanned_models.push(ScannedModel {
+            name,
+            path: canonical_string,
+            size_gb,
+            parameters: infer_model_parameters(&canonical_path),
+        });
+    }
+}
+
+fn should_descend(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| !name.starts_with('.'))
+        .unwrap_or(false)
+}
+
+fn is_gguf_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("gguf"))
+        .unwrap_or(false)
+}
+
+fn infer_model_parameters(path: &Path) -> String {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return "unknown".to_string();
+    };
+
+    let upper = file_name.to_uppercase();
+    for candidate in ["0.5B", "1.5B", "2B", "3B", "7B", "8B", "14B", "32B", "70B"] {
+        if upper.contains(candidate) {
+            return candidate.to_string();
+        }
+    }
+
+    "unknown".to_string()
+}
+
 // ============ 性能监控命令 ============
 
 /// 获取性能统计
 #[tauri::command]
-pub fn get_performance_stats(state: State<EngineState>) -> serde_json::Value {
+pub fn get_performance_stats(
+    state: State<EngineState>,
+    cache: State<InferenceCache>,
+) -> serde_json::Value {
     let engine = state.lock().unwrap();
     let threads = engine.get_threads();
     let ctx_size = engine.get_ctx_size();
     let gpu_layers = engine.get_gpu_layers();
+    let cache_stats = cache.stats();
 
     serde_json::json!({
         "threads": threads,
         "context_size": ctx_size,
         "gpu_layers": gpu_layers,
         "gpu_enabled": gpu_layers > 0,
-        "estimated_memory_mb": estimate_memory_usage(ctx_size, gpu_layers > 0)
+        "estimated_memory_mb": estimate_memory_usage(ctx_size, gpu_layers > 0),
+        "cache": cache_stats,
     })
 }
 
@@ -607,9 +632,8 @@ fn estimate_memory_usage(ctx_size: u32, gpu_enabled: bool) -> f64 {
 
 /// 清空推理缓存
 #[tauri::command]
-pub fn clear_inference_cache() -> Result<(), String> {
-    // TODO: 实现缓存清理
-    eprintln!("[缓存] 清空推理缓存");
+pub fn clear_inference_cache(cache: State<'_, InferenceCache>) -> Result<(), String> {
+    cache.clear();
     Ok(())
 }
 
@@ -637,19 +661,25 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
     // CPU 线程建议
     let physical_cores = num_cpus::get_physical();
     if threads > physical_cores as u32 {
-        suggestions.push("建议：线程数超过物理核心数，可能降低性能。建议设置为物理核心数。".to_string());
+        suggestions
+            .push("建议：线程数超过物理核心数，可能降低性能。建议设置为物理核心数。".to_string());
     } else if threads < physical_cores as u32 / 2 {
         suggestions.push("建议：可以增加线程数以提高性能。".to_string());
     }
 
     // 上下文大小建议
     if ctx_size > 4096 {
-        suggestions.push("提示：上下文大小较大，会占用更多内存。如不需要超长上下文，建议设置为 2048。".to_string());
+        suggestions.push(
+            "提示：上下文大小较大，会占用更多内存。如不需要超长上下文，建议设置为 2048。"
+                .to_string(),
+        );
     }
 
     // GPU 建议
     if gpu_layers == 0 {
-        suggestions.push("提示：当前使用 CPU 推理。如果有 GPU，可以启用 GPU 加速以获得更好的性能。".to_string());
+        suggestions.push(
+            "提示：当前使用 CPU 推理。如果有 GPU，可以启用 GPU 加速以获得更好的性能。".to_string(),
+        );
     }
 
     serde_json::json!({
@@ -695,3 +725,24 @@ pub fn get_kv_cache_size(state: State<EngineState>) -> u32 {
     engine.get_kv_cache_size()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_chat_generation_params, ChatGenerationParams};
+
+    #[test]
+    fn sanitize_chat_generation_params_clamps_supported_values() {
+        let (params, ctx_size) = sanitize_chat_generation_params(ChatGenerationParams {
+            temperature: 3.0,
+            top_p: 0.0,
+            max_tokens: 0,
+            ctx_size: 32,
+            repeat_penalty: 3.0,
+        });
+
+        assert_eq!(params.temperature, 2.0);
+        assert_eq!(params.top_p, 0.9);
+        assert_eq!(params.max_tokens, 1);
+        assert_eq!(params.repeat_penalty, 2.0);
+        assert_eq!(ctx_size, 64);
+    }
+}

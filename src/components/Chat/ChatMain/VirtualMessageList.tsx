@@ -10,16 +10,21 @@ import styles from './VirtualMessageList.module.css';
 interface VirtualMessageListProps {
   messages: Message[];
   streaming: boolean;
+  focusRequest?: {
+    id: number;
+    index: number;
+  } | null;
 }
 
-export function VirtualMessageList({ messages, streaming }: VirtualMessageListProps) {
+export function VirtualMessageList({ messages, streaming, focusRequest }: VirtualMessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 过滤系统消息并生成唯一 key
   const displayMessages = useMemo(
     () =>
       messages
-        .filter((m) => m.role !== 'system')
+        .filter(m => m.role !== 'system')
         .map((msg, index) => ({
           ...msg,
           _key: msg.id || `${msg.role}-${index}-${msg.content.slice(0, 10)}-${msg.content.length}`,
@@ -49,6 +54,44 @@ export function VirtualMessageList({ messages, streaming }: VirtualMessageListPr
     }
   }, [messages.length, streaming]);
 
+  useEffect(() => {
+    if (!focusRequest) {
+      return;
+    }
+
+    virtualizer.scrollToIndex(focusRequest.index, { align: 'center' });
+
+    const highlight = (attempt = 0) => {
+      const element = parentRef.current?.querySelector<HTMLElement>(
+        `[data-message-index="${focusRequest.index}"]`
+      );
+
+      if (!element) {
+        if (attempt < 5) {
+          highlightTimerRef.current = setTimeout(() => highlight(attempt + 1), 60);
+        }
+        return;
+      }
+
+      parentRef.current
+        ?.querySelectorAll<HTMLElement>(`.${styles.highlighted}`)
+        .forEach(node => node.classList.remove(styles.highlighted));
+
+      element.classList.add(styles.highlighted);
+      highlightTimerRef.current = setTimeout(() => {
+        element.classList.remove(styles.highlighted);
+      }, 2000);
+    };
+
+    highlight();
+
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, [focusRequest, virtualizer]);
+
   // 获取最后一条用户消息（用于流式状态显示）
   const lastUserMessage = messages[messages.length - 1];
 
@@ -61,12 +104,13 @@ export function VirtualMessageList({ messages, streaming }: VirtualMessageListPr
           position: 'relative',
         }}
       >
-        {virtualizer.getVirtualItems().map((virtualItem) => {
+        {virtualizer.getVirtualItems().map(virtualItem => {
           const message = displayMessages[virtualItem.index];
           return (
             <div
               key={virtualItem.key}
               data-index={virtualItem.index}
+              data-message-index={virtualItem.index}
               ref={virtualizer.measureElement}
               style={{
                 position: 'absolute',

@@ -82,6 +82,7 @@
   border: 1px solid var(--color-border-medium);
   border-radius: var(--radius-sm);
   font-size: 12px;
+  word-break: break-word;
 }
 
 .debugError {

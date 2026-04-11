@@ -2,10 +2,10 @@
 // 代码块组件（带高亮）
 
 import { useState } from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus, vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useTheme } from '../providers';
 import styles from './CodeBlock.module.css';
+import { normalizeCodeLanguage, SyntaxHighlighter } from './syntaxHighlighter';
 
 // 支持的编程语言
 const LANGUAGE_DISPLAY_NAMES: { [key: string]: string } = {
@@ -52,13 +52,14 @@ export function CodeBlock({ code, language = 'plaintext', streaming }: CodeBlock
       await navigator.clipboard.writeText(code);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (error) {
-      console.error('Failed to copy code:', error);
+    } catch {
+      setCopied(false);
     }
   };
 
   // 获取语言显示名称
   const languageDisplayName = LANGUAGE_DISPLAY_NAMES[language] || language;
+  const normalizedLanguage = normalizeCodeLanguage(language);
 
   // 选择主题
   const theme = resolvedTheme === 'dark' ? vscDarkPlus : vs;
@@ -79,7 +80,7 @@ export function CodeBlock({ code, language = 'plaintext', streaming }: CodeBlock
       </div>
       <div className={styles.codeContainer}>
         <SyntaxHighlighter
-          language={language}
+          language={normalizedLanguage}
           style={theme}
           customStyle={{
             margin: 0,
@@ -97,9 +98,4 @@ export function CodeBlock({ code, language = 'plaintext', streaming }: CodeBlock
       </div>
     </div>
   );
-}
-
-// 简单的内联代码组件
-export function InlineCode({ children }: { children: string }) {
-  return <code className={styles.inlineCode}>{children}</code>;
 }

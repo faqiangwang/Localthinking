@@ -9,11 +9,16 @@ import styles from './MessageList.module.css';
 interface MessageListProps {
   messages: Message[];
   streaming: boolean;
+  focusRequest?: {
+    id: number;
+    index: number;
+  } | null;
 }
 
-export function MessageList({ messages, streaming }: MessageListProps) {
+export function MessageList({ messages, streaming, focusRequest }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 自动滚动到底部（节流版本）
   useEffect(() => {
@@ -34,9 +39,44 @@ export function MessageList({ messages, streaming }: MessageListProps) {
     };
   }, [messages, streaming]);
 
+  useEffect(() => {
+    if (!focusRequest) {
+      return;
+    }
+
+    const messageElement = containerRef.current?.querySelector<HTMLElement>(
+      `[data-message-index="${focusRequest.index}"]`
+    );
+
+    if (!messageElement) {
+      return;
+    }
+
+    containerRef.current
+      ?.querySelectorAll<HTMLElement>(`.${styles.highlighted}`)
+      .forEach(element => element.classList.remove(styles.highlighted));
+
+    messageElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    messageElement.classList.add(styles.highlighted);
+
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+    }
+
+    highlightTimerRef.current = setTimeout(() => {
+      messageElement.classList.remove(styles.highlighted);
+    }, 2000);
+
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, [focusRequest]);
+
   // 过滤系统消息并生成唯一 key
   const displayMessages = messages
-    .filter((m) => m.role !== 'system')
+    .filter(m => m.role !== 'system')
     .map((msg, index) => ({
       ...msg,
       _key: msg.id || `${msg.role}-${index}-${msg.content.slice(0, 10)}-${msg.content.length}`,

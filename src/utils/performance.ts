@@ -1,5 +1,19 @@
 // src/utils/performance.ts
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from 'react';
+
+interface PerformanceMemory {
+  usedJSHeapSize: number;
+  totalJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
+interface PerformanceWithMemory extends Performance {
+  memory?: PerformanceMemory;
+}
+
+interface NavigatorWithDeviceMemory extends Navigator {
+  deviceMemory?: number;
+}
 
 /**
  * 防抖 Hook - 延迟执行函数
@@ -7,14 +21,23 @@ import { useCallback, useRef } from "react";
  * @param delay 延迟时间（毫秒）
  * @returns 防抖后的函数
  */
-export function useDebounce<T extends (...args: any[]) => any>(
-  fn: T,
+export function useDebounce<TArgs extends unknown[]>(
+  fn: (...args: TArgs) => void,
   delay: number
-): (...args: Parameters<T>) => void {
+): (...args: TArgs) => void {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(
+    () => () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    },
+    []
+  );
+
   return useCallback(
-    (...args: Parameters<T>) => {
+    (...args: TArgs) => {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
       }
@@ -33,28 +56,36 @@ export function useDebounce<T extends (...args: any[]) => any>(
  * @param limit 限制时间（毫秒）
  * @returns 节流后的函数
  */
-export function useThrottle<T extends (...args: any[]) => any>(
-  fn: T,
+export function useThrottle<TArgs extends unknown[]>(
+  fn: (...args: TArgs) => void,
   limit: number
-): (...args: Parameters<T>) => void {
+): (...args: TArgs) => void {
   const inThrottle = useRef(false);
-  const lastArgs = useRef<Parameters<T> | null>(null);
+  const lastArgs = useRef<TArgs | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    },
+    []
+  );
 
   return useCallback(
-    (...args: Parameters<T>) => {
+    (...args: TArgs) => {
       if (!inThrottle.current) {
         fn(...args);
         inThrottle.current = true;
-        setTimeout(() => {
+        timeoutRef.current = setTimeout(() => {
           inThrottle.current = false;
-          // 如果在节流期间有新的调用，执行最后一次
           if (lastArgs.current) {
             fn(...lastArgs.current);
             lastArgs.current = null;
           }
         }, limit);
       } else {
-        // 保存最后一次调用的参数
         lastArgs.current = args;
       }
     },
@@ -68,22 +99,30 @@ export function useThrottle<T extends (...args: any[]) => any>(
  * @param wait 等待时间（毫秒）
  * @returns 批处理后的函数
  */
-export function useBatch<T extends (...args: any[]) => any>(
-  fn: T,
+export function useBatch<TArgs extends unknown[]>(
+  fn: (...args: TArgs) => void,
   wait: number
-): (...args: Parameters<T>) => void {
-  const argsQueue = useRef<Parameters<T>[]>([]);
+): (...args: TArgs) => void {
+  const argsQueue = useRef<TArgs[]>([]);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(
+    () => () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    },
+    []
+  );
+
   return useCallback(
-    (...args: Parameters<T>) => {
+    (...args: TArgs) => {
       argsQueue.current.push(args);
 
       if (!timeoutRef.current) {
         timeoutRef.current = setTimeout(() => {
-          // 批量执行所有排队的调用
           if (argsQueue.current.length > 0) {
-            argsQueue.current.forEach((queuedArgs) => {
+            argsQueue.current.forEach(queuedArgs => {
               fn(...queuedArgs);
             });
             argsQueue.current = [];
@@ -134,10 +173,7 @@ export class PerformanceMonitor {
    * @param fn 异步函数
    * @returns 函数执行结果
    */
-  static async measure<T>(
-    name: string,
-    fn: () => Promise<T>
-  ): Promise<T> {
+  static async measure<T>(name: string, fn: () => Promise<T>): Promise<T> {
     this.start(name);
     try {
       return await fn();
@@ -170,8 +206,10 @@ export function getMemoryUsage(): {
   total: number;
   limit?: number;
 } | null {
-  if ('memory' in performance && (performance as any).memory) {
-    const memory = (performance as any).memory;
+  const performanceWithMemory = performance as PerformanceWithMemory;
+
+  if (performanceWithMemory.memory) {
+    const memory = performanceWithMemory.memory;
     return {
       used: memory.usedJSHeapSize,
       total: memory.totalJSHeapSize,
@@ -186,11 +224,9 @@ export function getMemoryUsage(): {
  * @returns 'low' | 'medium' | 'high'
  */
 export function getDevicePerformance(): 'low' | 'medium' | 'high' {
-  // 基于硬件并发数判断
   const cores = navigator.hardwareConcurrency || 2;
 
-  // 基于内存判断（如果可用）
-  const memory = (navigator as any).deviceMemory || 4; // GB
+  const memory = (navigator as NavigatorWithDeviceMemory).deviceMemory || 4;
 
   if (cores <= 2 || memory <= 2) {
     return 'low';

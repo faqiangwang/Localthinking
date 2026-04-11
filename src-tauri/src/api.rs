@@ -2,17 +2,22 @@
 // OpenAI / Anthropic / Gemini 兼容的 API 接口
 
 use crate::backend::Message;
+use crate::cache::{build_generation_cache_params_key, InferenceCache};
 use crate::chat::build_prompt;
-use crate::engine::{run_inference, InferenceParams, LlamaCppEngine};
+use crate::engine::{InferenceParams, LlamaCppEngine};
 use axum::{
     extract::State,
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::method_routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU16, Ordering},
+    Arc, Mutex,
+};
+use tokio::sync::oneshot;
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 
 // ============ API 配置 ============
@@ -23,11 +28,200 @@ const MAX_TOKENS_LIMIT: u32 = 256;
 #[derive(Clone)]
 pub struct ApiState {
     pub engine: Arc<Mutex<LlamaCppEngine>>,
+    pub cache: InferenceCache,
 }
 
 impl ApiState {
-    pub fn new(engine: Arc<Mutex<LlamaCppEngine>>) -> Self {
-        Self { engine }
+    pub fn new(engine: Arc<Mutex<LlamaCppEngine>>, cache: InferenceCache) -> Self {
+        Self { engine, cache }
+    }
+}
+
+#[derive(Clone)]
+pub struct ApiServerManager {
+    inner: Arc<ApiServerManagerInner>,
+}
+
+struct ApiServerManagerInner {
+    enabled: AtomicBool,
+    port: AtomicU16,
+    running: AtomicBool,
+    cache: InferenceCache,
+    lifecycle_lock: Mutex<()>,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    thread_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl ApiServerManager {
+    pub fn new(cache: InferenceCache) -> Self {
+        Self {
+            inner: Arc::new(ApiServerManagerInner {
+                enabled: AtomicBool::new(true),
+                port: AtomicU16::new(8080),
+                running: AtomicBool::new(false),
+                cache,
+                lifecycle_lock: Mutex::new(()),
+                shutdown_tx: Mutex::new(None),
+                thread_handle: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.inner.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn port(&self) -> u16 {
+        self.inner.port.load(Ordering::SeqCst)
+    }
+
+    pub fn set_port(&self, port: u16) {
+        self.inner.port.store(port, Ordering::SeqCst);
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.inner.running.load(Ordering::SeqCst)
+    }
+
+    pub fn start(&self, engine: Arc<Mutex<LlamaCppEngine>>) -> Result<(), String> {
+        let _guard = self
+            .inner
+            .lifecycle_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.start_inner(engine)
+    }
+
+    pub fn stop(&self) -> Result<(), String> {
+        let _guard = self
+            .inner
+            .lifecycle_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.stop_inner()
+    }
+
+    pub fn restart(&self, engine: Arc<Mutex<LlamaCppEngine>>) -> Result<(), String> {
+        let _guard = self
+            .inner
+            .lifecycle_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.stop_inner()?;
+        self.start_inner(engine)
+    }
+
+    fn start_inner(&self, engine: Arc<Mutex<LlamaCppEngine>>) -> Result<(), String> {
+        if self.is_running() {
+            return Ok(());
+        }
+
+        self.stop_inner()?;
+
+        if !self.is_enabled() {
+            return Ok(());
+        }
+
+        let port = self.port();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let manager = self.clone();
+
+        let handle = std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = startup_tx.send(Err(format!("无法创建 tokio runtime: {}", error)));
+                    manager.inner.running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            runtime.block_on(async move {
+                let app = build_router(ApiState::new(engine, manager.inner.cache.clone()));
+                let addr = format!("127.0.0.1:{}", port);
+
+                match tokio::net::TcpListener::bind(&addr).await {
+                    Ok(listener) => {
+                        manager.inner.running.store(true, Ordering::SeqCst);
+                        let _ = startup_tx.send(Ok(()));
+                        eprintln!("[INFO] API 服务器已启动: http://{}", addr);
+
+                        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+                            let _ = shutdown_rx.await;
+                        });
+
+                        if let Err(error) = server.await {
+                            eprintln!("[ERROR] API 服务器错误: {}", error);
+                        }
+                    }
+                    Err(error) => {
+                        manager.inner.running.store(false, Ordering::SeqCst);
+                        let _ = startup_tx.send(Err(format!("无法绑定端口 {}: {}", addr, error)));
+                        return;
+                    }
+                }
+
+                manager.inner.running.store(false, Ordering::SeqCst);
+            });
+        });
+
+        *self
+            .inner
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(shutdown_tx);
+        *self
+            .inner
+            .thread_handle
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(handle);
+
+        match startup_rx.recv() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                let _ = self.stop_inner();
+                Err(error)
+            }
+            Err(error) => {
+                let _ = self.stop_inner();
+                Err(format!("API 启动状态通道失败: {}", error))
+            }
+        }
+    }
+
+    fn stop_inner(&self) -> Result<(), String> {
+        if let Some(shutdown_tx) = self
+            .inner
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = shutdown_tx.send(());
+        }
+
+        if let Some(handle) = self
+            .inner
+            .thread_handle
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            handle
+                .join()
+                .map_err(|_| "API 服务线程异常退出".to_string())?;
+        }
+
+        self.inner.running.store(false, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -40,6 +234,7 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
+    pub repeat_penalty: Option<f32>,
     pub stream: Option<bool>,
     pub stop: Option<Vec<String>>,
 }
@@ -48,16 +243,6 @@ pub struct ChatCompletionRequest {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ChatCompletionResponse {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
-    pub choices: Vec<ChatChoice>,
-    pub usage: Usage,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +263,16 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatChoice>,
+    pub usage: Usage,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +322,142 @@ fn uuid_simple() -> String {
     format!("{:x}{:x}", now.as_secs(), now.subsec_nanos())
 }
 
+fn error_response(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(ErrorResponse {
+            error: ErrorDetail {
+                message: message.into(),
+                r#type: kind.to_string(),
+                code: None,
+            },
+        }),
+    )
+        .into_response()
+}
+
+fn invalid_request(message: impl Into<String>) -> Response {
+    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
+}
+
+fn validate_chat_request(
+    req: &ChatCompletionRequest,
+    loaded_model_name: &str,
+) -> Result<(), Response> {
+    if req.stream == Some(true) {
+        return Err(invalid_request("流式响应尚未实现，请使用 stream=false"));
+    }
+
+    if req.messages.is_empty() {
+        return Err(invalid_request("messages 不能为空"));
+    }
+
+    if let Some(model) = req.model.as_deref() {
+        if !model.is_empty() && model != loaded_model_name {
+            return Err(invalid_request(format!(
+                "当前仅支持已加载模型 `{}`，收到 `{}`",
+                loaded_model_name, model
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn build_inference_params(req: &ChatCompletionRequest) -> Result<InferenceParams, Response> {
+    let temperature = req.temperature.unwrap_or(0.7);
+    if !(0.0..=2.0).contains(&temperature) {
+        return Err(invalid_request("temperature 必须在 0.0 到 2.0 之间"));
+    }
+
+    let top_p = req.top_p.unwrap_or(0.9);
+    if !(0.0 < top_p && top_p <= 1.0) {
+        return Err(invalid_request("top_p 必须在 0.0 到 1.0 之间，且不能为 0"));
+    }
+
+    let max_tokens = req.max_tokens.unwrap_or(MAX_TOKENS_LIMIT);
+    if max_tokens == 0 {
+        return Err(invalid_request("max_tokens 必须大于 0"));
+    }
+    if max_tokens > MAX_TOKENS_LIMIT {
+        return Err(invalid_request(format!(
+            "max_tokens 不能超过 {}",
+            MAX_TOKENS_LIMIT
+        )));
+    }
+
+    let repeat_penalty = req
+        .repeat_penalty
+        .unwrap_or(InferenceParams::default().repeat_penalty);
+    if !(1.0..=2.0).contains(&repeat_penalty) {
+        return Err(invalid_request("repeat_penalty 必须在 1.0 到 2.0 之间"));
+    }
+
+    Ok(InferenceParams {
+        temperature,
+        top_p,
+        top_k: InferenceParams::default().top_k,
+        max_tokens: max_tokens as i32,
+        repeat_penalty,
+    })
+}
+
+fn normalize_stop_sequences(stop: Option<&[String]>) -> Vec<String> {
+    stop.unwrap_or(&[])
+        .iter()
+        .filter_map(|sequence| {
+            if sequence.trim().is_empty() {
+                None
+            } else {
+                Some(sequence.clone())
+            }
+        })
+        .collect()
+}
+
+fn finalize_completion(
+    mut content: String,
+    stop_sequences: &[String],
+    generated_tokens: usize,
+    max_tokens: i32,
+) -> (String, String) {
+    let mut finish_reason = if generated_tokens >= max_tokens.max(1) as usize {
+        "length".to_string()
+    } else {
+        "stop".to_string()
+    };
+
+    let stop_index = stop_sequences
+        .iter()
+        .filter_map(|sequence| content.find(sequence))
+        .min();
+
+    if let Some(index) = stop_index {
+        content.truncate(index);
+        finish_reason = "stop".to_string();
+    }
+
+    (content, finish_reason)
+}
+
+pub fn build_router(state: ApiState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin([
+            "http://localhost".parse().unwrap(),
+            "http://127.0.0.1".parse().unwrap(),
+        ])
+        .allow_methods(Any)
+        .allow_headers(AllowHeaders::any());
+
+    Router::new()
+        .route("/", get(index))
+        .route("/health", get(health))
+        .route("/v1/models", get(list_models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .layer(cors)
+        .with_state(state)
+}
+
 // ============ API 路由处理 ============
 
 /// POST /v1/chat/completions - OpenAI 兼容的聊天完成接口
@@ -135,47 +466,47 @@ pub async fn chat_completions(
     State(state): State<ApiState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
-    // 获取引擎状态并克隆必要数据
-    let (model, backend, n_threads, ctx_size, fmt, model_name) = {
+    let (fmt, model_name, ctx_size, model_identity, engine_arc, cache) = {
         let engine_guard = match state.engine.lock() {
             Ok(g) => g,
             Err(e) => {
-                let err = ErrorResponse {
-                    error: ErrorDetail {
-                        message: format!("获取引擎锁失败: {}", e),
-                        r#type: "internal_error".to_string(),
-                        code: None,
-                    },
-                };
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(err)).into_response();
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    format!("获取引擎锁失败: {}", e),
+                );
             }
         };
 
-        // 检查模型是否已加载
         if !engine_guard.is_model_loaded() {
-            let err = ErrorResponse {
-                error: ErrorDetail {
-                    message: "模型未加载，请先在应用中选择并加载模型".to_string(),
-                    r#type: "invalid_request_error".to_string(),
-                    code: None,
-                },
-            };
-            return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+            return invalid_request("模型未加载，请先在应用中选择并加载模型");
         }
 
-        // 克隆必要的数据
         (
-            engine_guard.model.clone(),
-            engine_guard.backend.clone(),
-            engine_guard.n_threads,
-            engine_guard.ctx_size,
             engine_guard.fmt.clone(),
             engine_guard.model_name.clone(),
+            engine_guard.get_ctx_size(),
+            engine_guard
+                .model_path
+                .clone()
+                .unwrap_or_else(|| engine_guard.model_name.clone()),
+            state.engine.clone(),
+            state.cache.clone(),
         )
     };
 
-    // 将 messages 转换为 backend::Message
-    let messages: Vec<Message> = req.messages
+    if let Err(response) = validate_chat_request(&req, &model_name) {
+        return response;
+    }
+
+    let inference_params = match build_inference_params(&req) {
+        Ok(params) => params,
+        Err(response) => return response,
+    };
+
+    let stop_sequences = normalize_stop_sequences(req.stop.as_deref());
+    let messages: Vec<Message> = req
+        .messages
         .into_iter()
         .map(|m| Message {
             role: m.role,
@@ -183,44 +514,101 @@ pub async fn chat_completions(
         })
         .collect();
 
-    // 构建提示词
     let prompt = build_prompt(&fmt, &messages);
+    let cache_params =
+        build_generation_cache_params_key(&model_identity, ctx_size, &inference_params);
 
-    // 使用用户指定的参数或默认值
-    let temperature = req.temperature.unwrap_or(0.7);
-    let top_p = req.top_p.unwrap_or(0.9);
-    let max_tokens = req.max_tokens.unwrap_or(2048).min(MAX_TOKENS_LIMIT) as i32;
+    if let Some(cached) = cache.get(&prompt, &cache_params) {
+        let (content, finish_reason) = finalize_completion(
+            cached.content,
+            &stop_sequences,
+            cached.token_count,
+            inference_params.max_tokens,
+        );
+        let prompt_tokens_calc = (prompt.len() as f32 / 4.0).ceil() as u32;
+        let completion_tokens_calc = cached.token_count as u32;
 
-    // TODO: 实现流式响应支持 SSE
-    // 当 stream == Some(true) 时，应返回 Server-Sent Events 流
-    if req.stream == Some(true) {
-        let err = ErrorResponse {
-            error: ErrorDetail {
-                message: "流式响应尚未实现，请使用 stream=false".to_string(),
-                r#type: "invalid_request_error".to_string(),
-                code: None,
+        let response = ChatCompletionResponse {
+            id: generate_id(),
+            object: "chat.completion".to_string(),
+            created: current_timestamp(),
+            model: model_name,
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ResponseMessage {
+                    role: "assistant".to_string(),
+                    content,
+                },
+                finish_reason,
+            }],
+            usage: Usage {
+                prompt_tokens: prompt_tokens_calc,
+                completion_tokens: completion_tokens_calc,
+                total_tokens: prompt_tokens_calc + completion_tokens_calc,
             },
         };
-        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+        return (StatusCode::OK, Json(response)).into_response();
     }
 
-    // 在阻塞任务中执行推理
+    use std::sync::Arc as StdArc;
+    use std::sync::Mutex as StdMutex;
+
+    let shared_output: StdArc<StdMutex<(String, usize)>> =
+        StdArc::new(StdMutex::new((String::new(), 0)));
+    let output_for_closure = shared_output.clone();
+
     let result = tokio::task::spawn_blocking(move || {
-        run_inference_api(
-            &model,
-            &backend,
-            n_threads,
-            ctx_size,
-            &prompt,
-            temperature,
-            top_p,
-            max_tokens,
-        )
+        let res = {
+            let engine = engine_arc.lock().unwrap_or_else(|p| p.into_inner());
+            engine.generate_stream_with_params(
+                messages,
+                inference_params.clone(),
+                move |token: String| {
+                    if token.is_empty() {
+                        return;
+                    }
+
+                    let mut output = output_for_closure
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    output.0.push_str(&token);
+                    output.1 += 1;
+                },
+            )
+        };
+
+        match res {
+            Ok(()) => {
+                let (content, generated_tokens) = {
+                    let output = shared_output
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (output.0.clone(), output.1)
+                };
+
+                let (content, finish_reason) = finalize_completion(
+                    content,
+                    &stop_sequences,
+                    generated_tokens,
+                    inference_params.max_tokens,
+                );
+                let prompt_tokens_calc = (prompt.len() as f32 / 4.0).ceil() as u32;
+                let completion_tokens_calc = generated_tokens as u32;
+                cache.set(&prompt, &cache_params, &content, generated_tokens);
+                Ok((
+                    content,
+                    finish_reason,
+                    prompt_tokens_calc,
+                    completion_tokens_calc,
+                ))
+            }
+            Err(e) => Err(format!("{}", e)),
+        }
     })
     .await;
 
     match result {
-        Ok(Ok((content, prompt_tokens, completion_tokens))) => {
+        Ok(Ok((content, finish_reason, prompt_tokens, completion_tokens))) => {
             let response = ChatCompletionResponse {
                 id: generate_id(),
                 object: "chat.completion".to_string(),
@@ -232,7 +620,7 @@ pub async fn chat_completions(
                         role: "assistant".to_string(),
                         content,
                     },
-                    finish_reason: "stop".to_string(),
+                    finish_reason,
                 }],
                 usage: Usage {
                     prompt_tokens,
@@ -242,77 +630,25 @@ pub async fn chat_completions(
             };
             (StatusCode::OK, Json(response)).into_response()
         }
-        Ok(Err(e)) => {
-            let err = ErrorResponse {
-                error: ErrorDetail {
-                    message: e,
-                    r#type: "internal_error".to_string(),
-                    code: None,
-                },
-            };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(err)).into_response()
-        }
-        Err(e) => {
-            let err = ErrorResponse {
-                error: ErrorDetail {
-                    message: format!("推理任务失败: {}", e),
-                    r#type: "internal_error".to_string(),
-                    code: None,
-                },
-            };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(err)).into_response()
-        }
+        Ok(Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("推理任务失败: {}", e),
+        ),
     }
 }
 
-/// API 推理核心函数 - 使用共享的推理逻辑
-fn run_inference_api(
-    model: &Arc<Mutex<Option<Arc<llama_cpp_2::model::LlamaModel>>>>,
-    backend: &Arc<llama_cpp_2::llama_backend::LlamaBackend>,
-    n_threads: u32,
-    ctx_size: u32,
-    prompt: &str,
-    temperature: f32,
-    top_p: f32,
-    max_tokens: i32,
-) -> Result<(String, u32, u32), String> {
-    // 获取模型
-    let model_guard = model.lock().map_err(|e| e.to_string())?;
-    let model = model_guard.as_ref().ok_or("模型未加载")?.clone();
-    drop(model_guard);
-
-    // 估算 prompt tokens（中文约 1 token/字符，英文约 1 token/4 字符）
-    // 注意：这是估算值，不够精确。如需准确计数，需使用模型对应的 tokenizer
-    let prompt_tokens = (prompt.len() as f32 / 4.0).ceil() as u32;
-
-    // 使用共享的推理函数
-    let params = InferenceParams {
-        temperature,
-        top_p,
-        top_k: 40,
-        max_tokens,
-        repeat_penalty: 1.1,
-        frequency_penalty: 0.0,
-        presence_penalty: 0.0,
-        use_mmap: true,
-        use_mlock: false,
-        n_batch: 512,
-        n_parallel: 1,
-    };
-
-    let output = run_inference(&model, backend, prompt, params, n_threads, ctx_size)?;
-
-    // 估算 completion tokens
-    let completion_tokens = (output.len() as f32 / 4.0).ceil() as u32;
-
-    Ok((output, prompt_tokens, completion_tokens))
-}
+// The real `run_inference_api` used llama types and required native toolchain.
+// We use `generate_stream` above to collect output from the engine (stub or native).
 
 /// GET /v1/models - 列出可用模型
-pub async fn list_models(State(state): State<ApiState>) -> Result<Json<ModelsResponse>, StatusCode> {
+pub async fn list_models(
+    State(state): State<ApiState>,
+) -> Result<Json<ModelsResponse>, StatusCode> {
     let (model_loaded, model_name) = match state.engine.lock() {
         Ok(guard) => {
-            let loaded = guard.model.lock().map(|m| m.is_some()).unwrap_or(false);
+            let loaded = guard.is_model_loaded();
             let name = guard.model_name.clone();
             (loaded, name)
         }
@@ -592,7 +928,7 @@ pub async fn index() -> impl IntoResponse {
                     <li><code>messages</code>: 消息数组（必需）</li>
                     <li><code>temperature</code>: 温度（0-2，默认 0.7）</li>
                     <li><code>top_p</code>: Top-P 采样（0-1，默认 0.9）</li>
-                    <li><code>max_tokens</code>: 最大生成 tokens（默认 2048，最大 256）</li>
+                    <li><code>max_tokens</code>: 最大生成 tokens（默认 256，最大 256）</li>
                     <li><code>stream</code>: 流式响应（暂不支持）</li>
                 </ul>
             </div>
@@ -620,11 +956,18 @@ pub async fn index() -> impl IntoResponse {
 }
 
 /// Model info endpoint
-pub async fn model_info(State(state): State<ApiState>) -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn model_info(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let (model_loaded, n_threads, ctx_size, model_name) = match state.engine.lock() {
         Ok(guard) => {
-            let loaded = guard.model.lock().map(|m| m.is_some()).unwrap_or(false);
-            (loaded, guard.n_threads, guard.ctx_size, guard.model_name.clone())
+            let loaded = guard.is_model_loaded();
+            (
+                loaded,
+                guard.n_threads,
+                guard.ctx_size,
+                guard.model_name.clone(),
+            )
         }
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
@@ -640,7 +983,7 @@ pub async fn model_info(State(state): State<ApiState>) -> Result<Json<serde_json
 // ============ 构建路由 ============
 
 pub fn create_api_router(engine: Arc<Mutex<LlamaCppEngine>>) -> Router {
-    let state = ApiState::new(engine);
+    let state = ApiState::new(engine, InferenceCache::new(128, 3600));
 
     // CORS 配置：限制为本地来源，增强安全性
     let cors = CorsLayer::new()

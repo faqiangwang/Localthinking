@@ -42,7 +42,6 @@
 .sessionItem.streamingDisabled {
   opacity: 0.5;
   cursor: not-allowed;
-  pointer-events: none;
 }
 
 .sessionName {

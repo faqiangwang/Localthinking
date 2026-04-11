@@ -2,7 +2,7 @@
 // 主聊天区域组件（带搜索和虚拟滚动）
 
 import { useState, useRef } from 'react';
-import { ChatSession, Message } from '../../../types';
+import { ChatSession, Message, ModelParams } from '../../../types';
 import { WelcomeScreen } from '../WelcomeScreen/WelcomeScreen';
 import { MessageList } from './MessageList';
 import { VirtualMessageList } from './VirtualMessageList';
@@ -19,6 +19,7 @@ interface ChatMainProps {
   modelLoaded: boolean;
   modelLoading: boolean;
   modelError: string | null;
+  modelParams: ModelParams;
   tokPerSec: number;
   tokenCount: number;
   onNewSession: () => void;
@@ -39,6 +40,7 @@ export function ChatMain({
   modelLoaded,
   modelLoading,
   modelError,
+  modelParams,
   tokPerSec,
   tokenCount,
   onNewSession,
@@ -48,6 +50,7 @@ export function ChatMain({
   showDebug,
 }: ChatMainProps) {
   const [showSearch, setShowSearch] = useState(false);
+  const [focusRequest, setFocusRequest] = useState<{ id: number; index: number } | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   // 判断是否使用虚拟滚动
@@ -56,23 +59,14 @@ export function ChatMain({
   // 处理搜索结果点击
   const handleSearchResultClick = (messageIndex: number) => {
     setShowSearch(false);
-
-    // 滚动到指定消息
-    setTimeout(() => {
-      const messageElement = document.querySelector(`[data-message-index="${messageIndex}"]`);
-      if (messageElement) {
-        messageElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        // 高亮闪烁效果
-        messageElement.classList.add(styles.highlighted);
-        setTimeout(() => {
-          messageElement.classList.remove(styles.highlighted);
-        }, 2000);
-      }
-    }, 100);
+    setFocusRequest({
+      id: Date.now(),
+      index: messageIndex,
+    });
   };
 
   // 过滤用于显示的消息（过滤系统消息）
-  const displayMessages = messages.filter((m) => m.role !== 'system');
+  const displayMessages = messages.filter(m => m.role !== 'system');
 
   return (
     <div className={styles.chatMain}>
@@ -86,11 +80,7 @@ export function ChatMain({
           >
             🔍
           </button>
-          <button
-            onClick={onToggleDebug}
-            className={styles.debugBtn}
-            title="显示调试信息"
-          >
+          <button onClick={onToggleDebug} className={styles.debugBtn} title="显示调试信息">
             {showDebug ? '隐藏调试' : '调试'}
           </button>
           <button onClick={onNewSession} className={styles.resetBtn}>
@@ -102,7 +92,11 @@ export function ChatMain({
       {/* 搜索栏 */}
       {showSearch && (
         <div className={styles.searchContainer}>
-          <SearchBar messages={displayMessages} onResultClick={handleSearchResultClick} />
+          <SearchBar
+            messages={displayMessages}
+            onResultClick={handleSearchResultClick}
+            onClose={() => setShowSearch(false)}
+          />
         </div>
       )}
 
@@ -128,18 +122,19 @@ export function ChatMain({
       {/* 消息列表 */}
       <div ref={messagesContainerRef} className={styles.messagesContainer}>
         {displayMessages.length === 0 && (
-          <WelcomeScreen
-            modelLoaded={modelLoaded}
-            modelParams={{ temperature: 0.7, top_p: 0.9, max_tokens: 2048, ctx_size: 2048, repeat_penalty: 1.1 }}
-          />
+          <WelcomeScreen modelLoaded={modelLoaded} modelParams={modelParams} />
         )}
 
         {displayMessages.length > 0 && (
           <>
             {useVirtualScroll ? (
-              <VirtualMessageList messages={messages} streaming={streaming} />
+              <VirtualMessageList
+                messages={messages}
+                streaming={streaming}
+                focusRequest={focusRequest}
+              />
             ) : (
-              <MessageList messages={messages} streaming={streaming} />
+              <MessageList messages={messages} streaming={streaming} focusRequest={focusRequest} />
             )}
           </>
         )}
@@ -153,12 +148,19 @@ export function ChatMain({
         </div>
       )}
 
-      <StatusBar streaming={streaming} tokPerSec={tokPerSec} tokenCount={tokenCount} onStop={onStop} />
+      <StatusBar
+        streaming={streaming}
+        tokPerSec={tokPerSec}
+        tokenCount={tokenCount}
+        onStop={onStop}
+      />
 
       <ChatInput
         onSend={onSend}
         disabled={streaming || !modelLoaded}
-        placeholder={!modelLoaded ? '请先加载模型...' : '输入消息... (Enter 发送，Shift+Enter 换行)'}
+        placeholder={
+          !modelLoaded ? '请先加载模型...' : '输入消息... (Enter 发送，Shift+Enter 换行)'
+        }
       />
     </div>
   );

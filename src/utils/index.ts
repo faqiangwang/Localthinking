@@ -3,7 +3,13 @@
 
 export { storage, STORAGE_KEYS } from './storage';
 export { hotkeyManager, registerHotkey, HOTKEYS } from './hotkeys';
-export { exportSession, exportChatToMarkdown, exportChatToJSON, exportChatToText, downloadFile } from './export';
+export {
+  exportSession,
+  exportChatToMarkdown,
+  exportChatToJSON,
+  exportChatToText,
+  downloadFile,
+} from './export';
 
 // 通用工具函数
 
@@ -17,13 +23,13 @@ export function generateId(): string {
 /**
  * 防抖函数
  */
-export function debounce<T extends (...args: any[]) => any>(
-  func: T,
+export function debounce<TArgs extends unknown[]>(
+  func: (...args: TArgs) => void,
   wait: number
-): (...args: Parameters<T>) => void {
+): (...args: TArgs) => void {
   let timeout: ReturnType<typeof setTimeout> | null = null;
 
-  return function executedFunction(...args: Parameters<T>) {
+  return function executedFunction(...args: TArgs) {
     const later = () => {
       timeout = null;
       func(...args);
@@ -39,13 +45,13 @@ export function debounce<T extends (...args: any[]) => any>(
 /**
  * 节流函数
  */
-export function throttle<T extends (...args: any[]) => any>(
-  func: T,
+export function throttle<TArgs extends unknown[]>(
+  func: (...args: TArgs) => void,
   limit: number
-): (...args: Parameters<T>) => void {
-  let inThrottle: boolean;
+): (...args: TArgs) => void {
+  let inThrottle = false;
 
-  return function executedFunction(...args: Parameters<T>) {
+  return function executedFunction(...args: TArgs) {
     if (!inThrottle) {
       func(...args);
       inThrottle = true;
@@ -114,7 +120,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       try {
         document.execCommand('copy');
         return true;
-      } catch (error) {
+      } catch {
         return false;
       } finally {
         document.body.removeChild(textArea);
@@ -129,19 +135,29 @@ export async function copyToClipboard(text: string): Promise<boolean> {
  * 深度克隆对象
  */
 export function deepClone<T>(obj: T): T {
-  if (obj === null || typeof obj !== 'object') {
-    return obj;
-  } else if (obj instanceof Date) {
-    return new Date(obj.getTime()) as any;
-  } else if (obj instanceof Array) {
-    return obj.map((item) => deepClone(item)) as any;
-  } else {
-    const clonedObj = {} as any;
-    for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
-        clonedObj[key] = deepClone(obj[key]);
-      }
-    }
-    return clonedObj;
+  if (typeof structuredClone === 'function') {
+    return structuredClone(obj);
   }
+
+  return cloneValue(obj) as T;
+}
+
+function cloneValue(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return new Date(value.getTime());
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => cloneValue(item));
+  }
+
+  const clonedObj: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value)) {
+    clonedObj[key] = cloneValue(nestedValue);
+  }
+  return clonedObj;
 }

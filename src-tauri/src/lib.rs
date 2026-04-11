@@ -1,4 +1,5 @@
 // src-tauri/src/lib.rs
+pub mod api;
 mod backend;
 mod cache;
 mod chat;
@@ -6,11 +7,12 @@ mod commands;
 mod engine;
 mod models;
 mod monitoring;
-pub mod api;
-mod virtual_memory;
-mod sysinfo;
 mod recommender;
+mod sysinfo;
+mod virtual_memory;
 
+use api::ApiServerManager;
+use cache::InferenceCache;
 use commands::EngineState;
 use engine::LlamaCppEngine;
 use std::sync::{Arc, Mutex};
@@ -27,29 +29,25 @@ pub fn run() {
         }
     };
     let state: EngineState = Arc::new(Mutex::new(engine));
-
-    // 启动 API 服务器
-    let api_engine = state.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("无法创建 tokio runtime");
-        rt.block_on(async {
-            start_api_server(api_engine).await;
-        });
-    });
+    let inference_cache = InferenceCache::new(128, 3600);
+    let api_manager = ApiServerManager::new(inference_cache.clone());
+    if let Err(error) = api_manager.start(state.clone()) {
+        eprintln!("[WARN] API 服务启动失败，但应用将继续运行: {}", error);
+    }
 
     // 运行 Tauri 应用，使用 match 处理可能的错误
-    if let Err(e) = tauri::Builder::default()
+    let run_result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .manage(inference_cache)
+        .manage(api_manager.clone())
         .invoke_handler(tauri::generate_handler![
             commands::load_model,
             commands::chat_stream,
             commands::stop_generation,
             commands::set_threads,
+            commands::set_context_size,
             commands::system_info,
             commands::download_model,
             commands::resolve_model_url,
@@ -76,95 +74,14 @@ pub fn run() {
             commands::set_kv_cache_size,
             commands::get_kv_cache_size,
         ])
-        .run(tauri::generate_context!())
-    {
+        .run(tauri::generate_context!());
+
+    if let Err(error) = api_manager.stop() {
+        eprintln!("[WARN] API 服务关闭失败: {}", error);
+    }
+
+    if let Err(e) = run_result {
         eprintln!("错误: Tauri 应用运行失败: {}", e);
         std::process::exit(1);
-    }
-}
-
-// API 服务器异步启动函数
-async fn start_api_server(engine: Arc<Mutex<LlamaCppEngine>>) {
-    use axum::{
-        Router,
-        routing::get,
-        extract::State,
-        response::IntoResponse,
-        Json,
-        http::StatusCode,
-    };
-    use tower_http::cors::{AllowHeaders, Any, CorsLayer};
-
-    #[derive(Clone)]
-    struct AppState {
-        engine: Arc<Mutex<LlamaCppEngine>>,
-    }
-
-    async fn index() -> &'static str {
-        "LocalMind API Running"
-    }
-
-    async fn health() -> &'static str {
-        "OK"
-    }
-
-    async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-        let response = match state.engine.lock() {
-            Ok(engine) => {
-                let loaded = engine.is_model_loaded();
-                serde_json::json!({
-                    "object": "list",
-                    "data": if loaded {
-                        vec![serde_json::json!({
-                            "id": engine.model_name.clone(),
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": "local"
-                        })]
-                    } else {
-                        vec![]
-                    }
-                })
-            }
-            Err(_) => serde_json::json!({
-                "object": "list",
-                "data": []
-            })
-        };
-        (StatusCode::OK, Json(response)).into_response()
-    }
-
-    let state = AppState { engine };
-
-    // CORS 配置
-    let cors = CorsLayer::new()
-        .allow_origin([
-            "http://localhost".parse().unwrap(),
-            "http://127.0.0.1".parse().unwrap(),
-        ])
-        .allow_methods(Any)
-        .allow_headers(AllowHeaders::any());
-
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/health", get(health))
-        .route("/v1/models", get(list_models))
-        .layer(cors)
-        .with_state(state);
-
-    let port = commands::get_api_port();
-    let addr = format!("127.0.0.1:{}", port);
-
-    match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => {
-            eprintln!("[INFO] API 服务器已启动: http://{}", addr);
-            if let Err(e) = axum::serve(listener, app).await {
-                eprintln!("[ERROR] API 服务器错误: {}", e);
-            }
-        }
-        Err(e) => {
-            eprintln!("[WARN] 无法绑定端口 {}: {}", addr, e);
-            eprintln!("[WARN] API 服务启动失败，但应用将继续运行");
-        }
     }
 }

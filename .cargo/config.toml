@@ -1,0 +1,5 @@
+[env]
+CXXFLAGS = ""
+CFLAGS = ""
+CXX = ""
+CC = ""

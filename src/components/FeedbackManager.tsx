@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
-import "./FeedbackManager.css";
+import { useState, useEffect } from 'react';
+import type { HardwareInfo } from '../types';
+import './FeedbackManager.css';
 
 interface Feedback {
   type: string;
   text: string;
-  hardware: any;
+  hardware: HardwareInfo | null;
   timestamp: number;
 }
 
@@ -16,98 +17,100 @@ interface FeedbackStats {
   other: number;
 }
 
+const EMPTY_STATS: FeedbackStats = {
+  total: 0,
+  helpful: 0,
+  notHelpful: 0,
+  needMoreModels: 0,
+  other: 0,
+};
+
 export function FeedbackManager() {
   const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
-  const [stats, setStats] = useState<FeedbackStats>({
-    total: 0,
-    helpful: 0,
-    notHelpful: 0,
-    needMoreModels: 0,
-    other: 0,
-  });
+  const [stats, setStats] = useState<FeedbackStats>(EMPTY_STATS);
   const [selectedFeedback, setSelectedFeedback] = useState<Feedback | null>(null);
-  const [filter, setFilter] = useState<string>("all");
+  const [filter, setFilter] = useState<string>('all');
 
   useEffect(() => {
     loadFeedbacks();
   }, []);
 
   const loadFeedbacks = () => {
-    const stored = localStorage.getItem("model_feedbacks");
-    if (stored) {
-      const data: Feedback[] = JSON.parse(stored);
+    const stored = localStorage.getItem('model_feedbacks');
+    if (!stored) {
+      setFeedbacks([]);
+      setStats(EMPTY_STATS);
+      return;
+    }
+
+    try {
+      const data = JSON.parse(stored) as Feedback[];
       setFeedbacks(data);
 
-      // 计算统计数据
       const newStats: FeedbackStats = {
         total: data.length,
-        helpful: data.filter(f => f.type === "helpful").length,
-        notHelpful: data.filter(f => f.type === "not-helpful").length,
-        needMoreModels: data.filter(f => f.type === "need-more-models").length,
-        other: data.filter(f => f.type === "other").length,
+        helpful: data.filter(f => f.type === 'helpful').length,
+        notHelpful: data.filter(f => f.type === 'not-helpful').length,
+        needMoreModels: data.filter(f => f.type === 'need-more-models').length,
+        other: data.filter(f => f.type === 'other').length,
       };
       setStats(newStats);
+    } catch {
+      setFeedbacks([]);
+      setStats(EMPTY_STATS);
     }
   };
 
   const exportFeedbacks = () => {
     const dataStr = JSON.stringify(feedbacks, null, 2);
-    const dataBlob = new Blob([dataStr], { type: "application/json" });
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement("a");
+    const link = document.createElement('a');
     link.href = url;
-    link.download = `model-feedbacks-${new Date().toISOString().split("T")[0]}.json`;
+    link.download = `model-feedbacks-${new Date().toISOString().split('T')[0]}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   const clearFeedbacks = () => {
-    if (window.confirm("确定要清空所有反馈吗？")) {
-      localStorage.removeItem("model_feedbacks");
+    if (window.confirm('确定要清空所有反馈吗？')) {
+      localStorage.removeItem('model_feedbacks');
       setFeedbacks([]);
-      setStats({
-        total: 0,
-        helpful: 0,
-        notHelpful: 0,
-        needMoreModels: 0,
-        other: 0,
-      });
+      setStats(EMPTY_STATS);
     }
   };
 
   const deleteFeedback = (index: number) => {
     const updated = feedbacks.filter((_, i) => i !== index);
-    localStorage.setItem("model_feedbacks", JSON.stringify(updated));
+    localStorage.setItem('model_feedbacks', JSON.stringify(updated));
     loadFeedbacks();
   };
 
-  const filteredFeedbacks = feedbacks.filter(f =>
-    filter === "all" ? true : f.type === filter
-  );
+  const filteredFeedbacks = feedbacks.filter(f => (filter === 'all' ? true : f.type === filter));
 
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp);
-    return date.toLocaleString("zh-CN");
+    return date.toLocaleString('zh-CN');
   };
 
   const getFeedbackTypeLabel = (type: string) => {
     const labels: Record<string, string> = {
-      "helpful": "👍 有帮助",
-      "not-helpful": "👎 不够准确",
-      "need-more-models": "➕ 需要更多模型",
-      "other": "💭 其他建议",
+      helpful: '👍 有帮助',
+      'not-helpful': '👎 不够准确',
+      'need-more-models': '➕ 需要更多模型',
+      other: '💭 其他建议',
     };
     return labels[type] || type;
   };
 
   const getFeedbackTypeColor = (type: string) => {
     const colors: Record<string, string> = {
-      "helpful": "#34c759",
-      "not-helpful": "#ff3b30",
-      "need-more-models": "#378ADD",
-      "other": "#888780",
+      helpful: '#34c759',
+      'not-helpful': '#ff3b30',
+      'need-more-models': '#378ADD',
+      other: '#888780',
     };
-    return colors[type] || "#888780";
+    return colors[type] || '#888780';
   };
 
   return (
@@ -151,13 +154,13 @@ export function FeedbackManager() {
       {/* 滤器 */}
       <div className="filter-bar">
         <span className="filter-label">筛选：</span>
-        {["all", "helpful", "not-helpful", "need-more-models", "other"].map(type => (
+        {['all', 'helpful', 'not-helpful', 'need-more-models', 'other'].map(type => (
           <button
             key={type}
-            className={`filter-btn ${filter === type ? "active" : ""}`}
+            className={`filter-btn ${filter === type ? 'active' : ''}`}
             onClick={() => setFilter(type)}
           >
-            {type === "all" ? "全部" : getFeedbackTypeLabel(type)}
+            {type === 'all' ? '全部' : getFeedbackTypeLabel(type)}
           </button>
         ))}
       </div>
@@ -166,9 +169,7 @@ export function FeedbackManager() {
       {filteredFeedbacks.length === 0 ? (
         <div className="no-feedbacks">
           <div className="icon">📭</div>
-          <div className="message">
-            {filter === "all" ? "暂无反馈数据" : "该分类下暂无反馈"}
-          </div>
+          <div className="message">{filter === 'all' ? '暂无反馈数据' : '该分类下暂无反馈'}</div>
         </div>
       ) : (
         <div className="feedback-list">
@@ -178,7 +179,10 @@ export function FeedbackManager() {
               className="feedback-item"
               onClick={() => setSelectedFeedback(feedback)}
             >
-              <div className="feedback-type-badge" style={{ background: getFeedbackTypeColor(feedback.type) }}>
+              <div
+                className="feedback-type-badge"
+                style={{ background: getFeedbackTypeColor(feedback.type) }}
+              >
                 {getFeedbackTypeLabel(feedback.type)}
               </div>
               <div className="feedback-summary">
@@ -186,21 +190,25 @@ export function FeedbackManager() {
                 {feedback.text && (
                   <div className="feedback-preview">
                     {feedback.text.length > 50
-                      ? feedback.text.substring(0, 50) + "..."
+                      ? feedback.text.substring(0, 50) + '...'
                       : feedback.text}
                   </div>
                 )}
                 {feedback.hardware && (
                   <div className="feedback-hardware">
-                    💾 {feedback.hardware.total_ram_gb?.toFixed(0)}GB RAM |
-                    ⚙️ {feedback.hardware.cpu_cores} 核心 |
-                    🚀 {feedback.hardware.has_avx512 ? "AVX-512" : feedback.hardware.has_avx2 ? "AVX2" : "无加速"}
+                    💾 {feedback.hardware.total_ram_gb?.toFixed(0)}GB RAM | ⚙️{' '}
+                    {feedback.hardware.cpu_cores} 核心 | 🚀{' '}
+                    {feedback.hardware.has_avx512
+                      ? 'AVX-512'
+                      : feedback.hardware.has_avx2
+                        ? 'AVX2'
+                        : '无加速'}
                   </div>
                 )}
               </div>
               <button
                 className="delete-feedback-btn"
-                onClick={(e) => {
+                onClick={e => {
                   e.stopPropagation();
                   deleteFeedback(index);
                 }}
@@ -240,21 +248,30 @@ export function FeedbackManager() {
                   <div className="hardware-grid">
                     <div className="hardware-item">
                       <span className="hardware-label">总内存</span>
-                      <span className="hardware-value">{selectedFeedback.hardware.total_ram_gb?.toFixed(0)} GB</span>
+                      <span className="hardware-value">
+                        {selectedFeedback.hardware.total_ram_gb?.toFixed(0)} GB
+                      </span>
                     </div>
                     <div className="hardware-item">
                       <span className="hardware-label">可用内存</span>
-                      <span className="hardware-value">{selectedFeedback.hardware.available_ram_gb?.toFixed(0)} GB</span>
+                      <span className="hardware-value">
+                        {selectedFeedback.hardware.available_ram_gb?.toFixed(0)} GB
+                      </span>
                     </div>
                     <div className="hardware-item">
                       <span className="hardware-label">CPU 核心</span>
-                      <span className="hardware-value">{selectedFeedback.hardware.cpu_cores} 核</span>
+                      <span className="hardware-value">
+                        {selectedFeedback.hardware.cpu_cores} 核
+                      </span>
                     </div>
                     <div className="hardware-item">
                       <span className="hardware-label">SIMD</span>
                       <span className="hardware-value">
-                        {selectedFeedback.hardware.has_avx512 ? "AVX-512" :
-                         selectedFeedback.hardware.has_avx2 ? "AVX2" : "无加速"}
+                        {selectedFeedback.hardware.has_avx512
+                          ? 'AVX-512'
+                          : selectedFeedback.hardware.has_avx2
+                            ? 'AVX2'
+                            : '无加速'}
                       </span>
                     </div>
                     <div className="hardware-item">

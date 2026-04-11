@@ -7,18 +7,23 @@ pub enum PromptFormat {
     Llama3,
     Gemma,
     Mistral,
+    DeepSeek,
 }
 
 /// 计算对话历史的 token 估算数量
 /// 中文约 1 token/字符，英文约 1 token/4 字符
+#[allow(dead_code)]
 pub fn estimate_tokens(text: &str) -> usize {
     // 简单估算：中文字符 * 1 + 英文字符 / 4
-    let chinese_chars = text.chars().filter(|c| {
-        let cp = *c as u32;
-        (0x4E00..=0x9FFF).contains(&cp) || // CJK 统一汉字
+    let chinese_chars = text
+        .chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            (0x4E00..=0x9FFF).contains(&cp) || // CJK 统一汉字
         (0x3400..=0x4DBF).contains(&cp) || // CJK 扩展A
         (0x20000..=0x2A6DF).contains(&cp) // CJK 扩展B
-    }).count();
+        })
+        .count();
 
     let total_chars = text.chars().count();
     let non_chinese = total_chars - chinese_chars;
@@ -28,6 +33,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 /// 智能截断对话历史，确保不超过最大 token 限制
 /// 保留最近的消息，丢弃最旧的消息
+#[allow(dead_code)]
 pub fn truncate_messages(messages: &[Message], max_tokens: usize) -> Vec<Message> {
     let mut result = Vec::new();
     let mut current_tokens = 0;
@@ -51,10 +57,9 @@ pub fn truncate_messages(messages: &[Message], max_tokens: usize) -> Vec<Message
 }
 
 /// 根据对话历史动态计算推荐的上下文大小
+#[allow(dead_code)]
 pub fn recommend_context_size(messages: &[Message]) -> usize {
-    let total_tokens: usize = messages.iter()
-        .map(|m| estimate_tokens(&m.content))
-        .sum();
+    let total_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
 
     // 根据对话历史大小推荐合适的上下文
     // 留出 50% 的余量给新生成的文本
@@ -73,8 +78,10 @@ pub fn detect_format(model_filename: &str) -> PromptFormat {
         PromptFormat::Gemma
     } else if name.contains("mistral") {
         PromptFormat::Mistral
+    } else if name.contains("deepseek") {
+        PromptFormat::DeepSeek
     } else {
-        PromptFormat::ChatML // Qwen / DeepSeek / 默认
+        PromptFormat::ChatML // Qwen / 默认
     }
 }
 
@@ -83,7 +90,10 @@ pub fn build_prompt(fmt: &PromptFormat, messages: &[Message]) -> String {
         PromptFormat::ChatML => {
             let mut s = String::new();
             for m in messages {
-                s.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", m.role, m.content));
+                s.push_str(&format!(
+                    "<|im_start|>{}\n{}<|im_end|>\n",
+                    m.role, m.content
+                ));
             }
             s.push_str("<|im_start|>assistant\n");
             s
@@ -108,7 +118,10 @@ pub fn build_prompt(fmt: &PromptFormat, messages: &[Message]) -> String {
                     "assistant" | "bot" => "model",
                     _ => "user",
                 };
-                s.push_str(&format!("<start_of_turn>{}\n{}<end_of_turn>\n", role, m.content));
+                s.push_str(&format!(
+                    "<start_of_turn>{}\n{}<end_of_turn>\n",
+                    role, m.content
+                ));
             }
             s.push_str("<start_of_turn>model\n");
             s
@@ -132,6 +145,23 @@ pub fn build_prompt(fmt: &PromptFormat, messages: &[Message]) -> String {
                 }
                 is_first = false;
             }
+            s
+        }
+        PromptFormat::DeepSeek => {
+            // DeepSeek-R1 格式 (注意: BOS token 会由 str_to_token 自动添加)
+            let mut s = String::new();
+            for m in messages {
+                match m.role.as_str() {
+                    "user" => {
+                        s.push_str(&format!("User: {}\n\n", m.content));
+                    }
+                    "assistant" | "bot" => {
+                        s.push_str(&format!("Assistant: {}\n\n", m.content));
+                    }
+                    _ => {}
+                }
+            }
+            s.push_str("Assistant: ");
             s
         }
     }

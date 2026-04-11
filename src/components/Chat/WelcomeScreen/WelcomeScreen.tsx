@@ -27,6 +27,8 @@ export function WelcomeScreen({ modelLoaded, modelParams }: WelcomeScreenProps) 
         <span>Temperature: {modelParams.temperature}</span>
         <span>Top-P: {modelParams.top_p}</span>
         <span>Max Tokens: {modelParams.max_tokens}</span>
+        <span>Context: {modelParams.ctx_size}</span>
+        <span>Repeat Penalty: {modelParams.repeat_penalty}</span>
       </div>
     </div>
   );

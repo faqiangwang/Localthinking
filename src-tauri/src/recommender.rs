@@ -1,27 +1,27 @@
 // src-tauri/src/recommender.rs
-use serde::{Deserialize, Serialize};
 use crate::sysinfo::HardwareInfo;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRecommendation {
-    pub name:         String,
-    pub filename:     String,        // GGUF 文件名
-    pub size_gb:      f32,
-    pub quant:        String,        // "Q4_K_M" 等
-    pub params:       String,        // "7B" 等
-    pub tier:         RecommendTier,
-    pub reason:       String,        // 推荐理由，展示给用户
-    pub speed_note:   String,        // 预期速度描述
+    pub name: String,
+    pub filename: String, // GGUF 文件名
+    pub size_gb: f32,
+    pub quant: String,  // "Q4_K_M" 等
+    pub params: String, // "7B" 等
+    pub tier: RecommendTier,
+    pub reason: String,     // 推荐理由，展示给用户
+    pub speed_note: String, // 预期速度描述
     pub download_url: String,
-    pub is_draft:     bool,          // 是否为 Speculative Decoding 草稿模型
+    pub is_draft: bool, // 是否为 Speculative Decoding 草稿模型
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RecommendTier {
-    Best,       // 最推荐，绿色
-    Good,       // 次推荐，蓝色
-    Marginal,   // 勉强可用，黄色
-    TooLarge,   // 不可用，灰色
+    Best,     // 最推荐，绿色
+    Good,     // 次推荐，蓝色
+    Marginal, // 勉强可用，黄色
+    TooLarge, // 不可用，灰色
 }
 
 // 候选模型库
@@ -244,11 +244,16 @@ pub fn recommend(hw: &HardwareInfo) -> Vec<ModelRecommendation> {
         .map(|mut m| {
             // 根据可用内存重新定级
             if m.size_gb > usable_gb {
-                m.tier   = RecommendTier::TooLarge;
-                m.reason = format!("需要 {:.0}GB 可用内存，当前仅 {:.0}GB", m.size_gb, usable_gb);
+                m.tier = RecommendTier::TooLarge;
+                m.reason = format!(
+                    "需要 {:.0}GB 可用内存，当前仅 {:.0}GB",
+                    m.size_gb, usable_gb
+                );
             } else if m.size_gb > usable_gb * 0.75 {
                 // 内存占用超过 75%，降级为 Marginal
-                if m.tier == RecommendTier::Best { m.tier = RecommendTier::Good; }
+                if m.tier == RecommendTier::Best {
+                    m.tier = RecommendTier::Good;
+                }
                 m.reason = format!("{}（内存较紧张）", m.reason);
             }
 

@@ -1,57 +1,19 @@
-// src-tauri/src/engine.rs
-use crate::backend::{InferenceBackend, Message};
-use crate::chat::{build_prompt, PromptFormat};
-use llama_cpp_2::{
-    context::params::LlamaContextParams,
-    llama_backend::LlamaBackend,
-    llama_batch::LlamaBatch,
-    model::{params::LlamaModelParams, AddBos, LlamaModel},
-    sampling::LlamaSampler,
+use crate::backend::{InferenceBackend, Message, ModelInfo};
+use crate::chat::PromptFormat;
+use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
-// ============ 常量定义 ============
-
-/// 默认上下文大小
-// 根据设备配置自动调整：
-// - 低配设备 (< 8GB RAM): 1024-2048
-// - 中等设备 (8-16GB RAM): 2048-4096
-// - 高配设备 (> 16GB RAM): 4096-8192
-const DEFAULT_CONTEXT_SIZE: u32 = 2048;
-/// 最小上下文大小限制
-const MIN_CONTEXT_SIZE: u32 = 64;
-/// 重复惩罚历史长度
-const REPEAT_PENALTY_HISTORY: u32 = 32;
-/// 默认批处理大小（提高吞吐量）
-const DEFAULT_N_BATCH: u32 = 512;
-/// 默认张量并行度（设为1禁用）
-const DEFAULT_N_U_PARALLEL: u32 = 1;
-
-/// 推理参数结构，用于配置采样行为
+/// 推理参数
 #[derive(Clone, Debug)]
 pub struct InferenceParams {
-    /// 温度参数（0.0-2.0），越高越随机
     pub temperature: f32,
-    /// Top-p 采样阈值（0.0-1.0）
     pub top_p: f32,
-    /// Top-k 采样数量（1-100）
     pub top_k: i32,
-    /// 最大生成 token 数
     pub max_tokens: i32,
-    /// 重复惩罚因子（1.0-2.0）
     pub repeat_penalty: f32,
-    /// 频率惩罚（-2.0-2.0），降低重复token的频率
-    pub frequency_penalty: f32,
-    /// 存在惩罚（-2.0-2.0），惩罚已出现过的token
-    pub presence_penalty: f32,
-    /// 是否使用 MMAP（内存映射）
-    pub use_mmap: bool,
-    /// 是否锁定内存（防止swap）
-    pub use_mlock: bool,
-    /// 批处理大小
-    pub n_batch: u32,
-    /// 张量并行度
-    pub n_parallel: u32,
 }
 
 impl Default for InferenceParams {
@@ -62,657 +24,536 @@ impl Default for InferenceParams {
             top_k: 40,
             max_tokens: 2048,
             repeat_penalty: 1.1,
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
-            use_mmap: true,
-            use_mlock: false,
-            n_batch: DEFAULT_N_BATCH,
-            n_parallel: DEFAULT_N_U_PARALLEL,
         }
     }
 }
 
-/// 执行推理的核心逻辑，返回生成的文本
-pub fn run_inference(
-    model: &Arc<LlamaModel>,
-    backend: &Arc<LlamaBackend>,
-    prompt: &str,
-    params: InferenceParams,
-    n_threads: u32,
-    ctx_size: u32,
-) -> Result<String, String> {
-    // 使用安全的 NonZeroU32 处理
-    let safe_ctx_size = ctx_size.max(MIN_CONTEXT_SIZE);
-    let n_ctx = std::num::NonZeroU32::new(safe_ctx_size)
-        .unwrap_or(std::num::NonZeroU32::MIN);
+#[cfg(feature = "llama-cpp-2")]
+mod imp {
+    use super::*;
+    use encoding_rs::UTF_8;
+    use llama_cpp_2::context::params::LlamaContextParams;
+    use llama_cpp_2::llama_backend::LlamaBackend;
+    use llama_cpp_2::llama_batch::LlamaBatch;
+    use llama_cpp_2::model::params::LlamaModelParams;
+    use llama_cpp_2::model::{AddBos, LlamaModel};
+    use llama_cpp_2::sampling::LlamaSampler;
+    use std::num::NonZeroU32;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    // 优化的上下文参数配置
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(Some(n_ctx))
-        .with_n_threads(n_threads.max(1) as i32)
-        .with_n_threads_batch((n_threads / 2).max(1) as i32)
-        .with_n_batch(params.n_batch);
-
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|e| format!("无法创建推理上下文: {}", e))?;
-
-    // Tokenize
-    let tokens = model
-        .str_to_token(prompt, AddBos::Never)
-        .map_err(|e| format!("无法将提示词转为 token: {}", e))?;
-
-    if tokens.is_empty() {
-        return Err("提示词为空".to_string());
+    /// LlamaCppEngine - 使用 llama-cpp-2 进行真实推理
+    pub struct LlamaCppEngine {
+        pub n_threads: u32,
+        pub ctx_size: u32,
+        pub fmt: PromptFormat,
+        pub api_port: u16,
+        pub model_name: String,
+        pub model_path: Option<String>,
+        pub abort_flag: Arc<AtomicBool>,
+        pub model_loaded: Arc<Mutex<bool>>,
+        pub backend: LlamaBackend,
+        pub model: Arc<Mutex<Option<LlamaModel>>>,
     }
 
-    // 初始批次 - 重要：所有 token 都启用 logits，这样后续采样时不会出错
-    let mut batch = LlamaBatch::new(tokens.len(), 1);
-    for (i, &t) in tokens.iter().enumerate() {
-        // logits 设置为 true，确保所有位置都可以采样
-        batch.add(t, i as i32, &[0], true)
-            .map_err(|e| format!("无法添加 token 到批次: {}", e))?;
-    }
+    unsafe impl Send for LlamaCppEngine {}
+    unsafe impl Sync for LlamaCppEngine {}
 
-    ctx.decode(&mut batch)
-        .map_err(|e| format!("初始解码失败: {}", e))?;
-
-    // 创建优化的采样器链
-    // 顺序很重要： penalties -> top_k -> top_p -> temperature -> dist
-    let mut sampler = LlamaSampler::chain_simple([
-        // 重复惩罚：防止模型重复相同的内容
-        LlamaSampler::penalties(
-            REPEAT_PENALTY_HISTORY as i32,
-            params.repeat_penalty,
-            params.frequency_penalty,
-            params.presence_penalty,
-        ),
-        // Top-K：只从概率最高的 K 个 token 中采样
-        LlamaSampler::top_k(params.top_k.max(1)),
-        // Top-P（Nucleus）：从累积概率达到 P 的最小集合中采样
-        LlamaSampler::top_p((params.top_p as f32).max(0.01), 1),
-        // Temperature：控制随机性，越高越随机
-        LlamaSampler::temp(params.temperature.max(0.01)),
-        // 分布式采样（确定性）
-        LlamaSampler::dist(42),
-    ]);
-
-    let mut n_cur = batch.n_tokens();
-    let mut output = String::new();
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
-
-    loop {
-        if params.max_tokens > 0 && n_cur - batch.n_tokens() >= params.max_tokens {
-            break;
+    impl LlamaCppEngine {
+        pub fn new() -> anyhow::Result<Self> {
+            Self::with_config(2048, PromptFormat::ChatML)
         }
 
-        let token = sampler.sample(&ctx, n_cur - 1);
-        sampler.accept(token);
+        pub fn with_config(ctx_size: u32, fmt: PromptFormat) -> anyhow::Result<Self> {
+            let backend = LlamaBackend::init()
+                .map_err(|e| anyhow::anyhow!("Failed to initialize llama backend: {}", e))?;
 
-        if model.is_eog_token(token) {
-            break;
+            Ok(Self {
+                n_threads: num_cpus::get_physical() as u32,
+                ctx_size: ctx_size.max(64),
+                fmt,
+                api_port: 8080,
+                model_name: String::new(),
+                model_path: None,
+                abort_flag: Arc::new(AtomicBool::new(false)),
+                model_loaded: Arc::new(Mutex::new(false)),
+                backend,
+                model: Arc::new(Mutex::new(None)),
+            })
         }
 
-        // 解码 token 为文本，遇到错误时跳过输出但仍推进位置
-        // 重要：必须无条件增加 n_cur，否则会导致采样器位置错误
-        let decoded_text = match model.token_to_piece(token, &mut decoder, true, None) {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        };
-
-        // 如果解码成功，添加到输出
-        if let Some(text) = decoded_text {
-            output.push_str(&text);
+        pub fn set_threads(&mut self, n: u32) {
+            self.n_threads = n;
         }
 
-        let mut next = LlamaBatch::new(1, 1);
-        // 重要：位置使用 n_cur，这是新 token 在序列中的绝对位置
-        // logits 设置为 true，确保我们可以采样这个位置
-        next.add(token, n_cur, &[0], true)
-            .map_err(|e| format!("无法添加下一个 token: {}", e))?;
-        ctx.decode(&mut next)
-            .map_err(|e| format!("解码失败: {}", e))?;
-
-        // 重要：必须无条件增加 n_cur
-        // 否则会导致采样器在同一个位置重复采样，触发断言失败
-        n_cur += 1;
-
-        if n_cur as u32 >= ctx_size {
-            break;
-        }
-    }
-
-    Ok(output)
-}
-
-/// 流式推理核心逻辑，通过回调逐个发送 token
-#[allow(dead_code)]
-pub fn run_inference_stream<F>(
-    model: &Arc<LlamaModel>,
-    backend: &Arc<LlamaBackend>,
-    prompt: &str,
-    params: InferenceParams,
-    n_threads: u32,
-    ctx_size: u32,
-    on_token: F,
-) -> Result<(), String>
-where
-    F: Fn(String) + Send + Sync + 'static,
-{
-    // 使用安全的 NonZeroU32 处理
-    let safe_ctx_size = ctx_size.max(MIN_CONTEXT_SIZE);
-    let n_ctx = std::num::NonZeroU32::new(safe_ctx_size)
-        .unwrap_or(std::num::NonZeroU32::MIN);
-
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(Some(n_ctx))
-        .with_n_threads(n_threads.max(1) as i32)
-        .with_n_threads_batch((n_threads / 2).max(1) as i32);
-
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|e| format!("无法创建推理上下文: {}", e))?;
-
-    // Tokenize
-    let tokens = model
-        .str_to_token(prompt, AddBos::Never)
-        .map_err(|e| format!("无法将提示词转为 token: {}", e))?;
-
-    if tokens.is_empty() {
-        return Err("提示词为空".to_string());
-    }
-
-    // 初始批次 - 重要：所有 token 都启用 logits，这样后续采样时不会出错
-    let mut batch = LlamaBatch::new(tokens.len(), 1);
-    for (i, &t) in tokens.iter().enumerate() {
-        // logits 设置为 true，确保所有位置都可以采样
-        batch.add(t, i as i32, &[0], true)
-            .map_err(|e| format!("无法添加 token 到批次: {}", e))?;
-    }
-
-    ctx.decode(&mut batch)
-        .map_err(|e| format!("初始解码失败: {}", e))?;
-
-    // 创建优化的采样器链
-    // 顺序很重要： penalties -> top_k -> top_p -> temperature -> dist
-    let mut sampler = LlamaSampler::chain_simple([
-        // 重复惩罚：防止模型重复相同的内容
-        LlamaSampler::penalties(
-            REPEAT_PENALTY_HISTORY as i32,
-            params.repeat_penalty,
-            params.frequency_penalty,
-            params.presence_penalty,
-        ),
-        // Top-K：只从概率最高的 K 个 token 中采样
-        LlamaSampler::top_k(params.top_k.max(1)),
-        // Top-P（Nucleus）：从累积概率达到 P 的最小集合中采样
-        LlamaSampler::top_p((params.top_p as f32).max(0.01), 1),
-        // Temperature：控制随机性，越高越随机
-        LlamaSampler::temp(params.temperature.max(0.01)),
-        // 分布式采样（确定性）
-        LlamaSampler::dist(42),
-    ]);
-
-    let mut n_cur = batch.n_tokens();
-    let mut completion_tokens = 0;
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
-
-    loop {
-        if params.max_tokens > 0 && completion_tokens >= params.max_tokens {
-            break;
+        pub fn get_threads(&self) -> u32 {
+            self.n_threads
         }
 
-        let token = sampler.sample(&ctx, n_cur - 1);
-        sampler.accept(token);
-
-        if model.is_eog_token(token) {
-            break;
+        pub fn set_ctx_size(&mut self, s: u32) {
+            self.ctx_size = s.max(64);
         }
 
-        // 解码 token 为文本，遇到错误时跳过回调但仍推进位置
-        // 重要：必须无条件增加 n_cur，否则会导致采样器位置错误
-        let decoded_text = match model.token_to_piece(token, &mut decoder, true, None) {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        };
-
-        // 如果解码成功，调用回调
-        if let Some(text) = decoded_text {
-            on_token(text);
+        pub fn get_ctx_size(&self) -> u32 {
+            self.ctx_size
         }
 
-        let mut next = LlamaBatch::new(1, 1);
-        // 重要：位置使用 n_cur，这是新 token 在序列中的绝对位置
-        // logits 设置为 true，确保我们可以采样这个位置
-        next.add(token, n_cur, &[0], true)
-            .map_err(|e| format!("无法添加下一个 token: {}", e))?;
-        ctx.decode(&mut next)
-            .map_err(|e| format!("解码失败: {}", e))?;
-
-        // 重要：必须无条件增加 n_cur 和 completion_tokens
-        // 否则会导致采样器在同一个位置重复采样，触发断言失败
-        n_cur += 1;
-        completion_tokens += 1;
-
-        if n_cur as u32 >= ctx_size {
-            break;
+        pub fn set_model_name(&mut self, n: String) {
+            self.model_name = n;
         }
-    }
 
-    Ok(())
-}
-
-pub struct LlamaCppEngine {
-    pub backend:       Arc<LlamaBackend>,
-    pub model:         Arc<Mutex<Option<Arc<LlamaModel>>>>,
-    pub n_threads:     u32,           // CPU 线程数，默认 = 物理核心数
-    pub n_gpu_layers:  i32,           // GPU 层数（0=仅CPU, -1=全部, >0=指定层数）
-    pub ctx_size:      u32,
-    pub fmt:           PromptFormat,
-    pub api_port:      u16,            // API 服务器端口
-    pub model_name:    String,         // 当前模型名称
-    pub abort_flag:    Arc<AtomicBool>, // 中断标志
-    pub use_kv_cache:  bool,           // 是否使用 KV Cache
-    pub kv_cache_size: u32,            // KV Cache 大小（tokens）
-}
-
-impl LlamaCppEngine {
-    pub fn new() -> anyhow::Result<Self> {
-        Self::with_config(DEFAULT_CONTEXT_SIZE, PromptFormat::ChatML)
-    }
-
-    pub fn with_config(ctx_size: u32, fmt: PromptFormat) -> anyhow::Result<Self> {
-        let backend = LlamaBackend::init()?;
-        // 官方建议：CPU-only 推理使用物理核心数，不使用超线程
-        // 超线程（SMT）会降低推理性能，而不是提升
-        let physical_cores = num_cpus::get_physical() as u32;
-        let n_threads = physical_cores;
-        let n_gpu_layers = 0; // 默认使用 CPU（设为 -1 可尝试使用所有 GPU）
-        let use_kv_cache = true; // 默认启用 KV Cache
-        let kv_cache_size = 2048; // 默认 KV Cache 大小
-        Ok(Self {
-            backend: Arc::new(backend),
-            model: Arc::new(Mutex::new(None)),
-            n_threads,
-            n_gpu_layers,
-            ctx_size: ctx_size.max(MIN_CONTEXT_SIZE),
-            fmt,
-            api_port: 8080,
-            model_name: "local-model".to_string(),
-            abort_flag: Arc::new(AtomicBool::new(false)),
-            use_kv_cache,
-            kv_cache_size,
-        })
-    }
-
-    /// 用户可在设置页调整线程数
-    pub fn set_threads(&mut self, n: u32) {
-        self.n_threads = n;
-    }
-
-    /// 获取当前线程数
-    pub fn get_threads(&self) -> u32 {
-        self.n_threads
-    }
-
-    /// 设置 GPU 层数
-    /// n: 0=仅CPU, -1=所有层到GPU, >0=指定层数到GPU
-    pub fn set_gpu_layers(&mut self, n: i32) {
-        self.n_gpu_layers = n;
-    }
-
-    /// 获取当前 GPU 层数
-    pub fn get_gpu_layers(&self) -> i32 {
-        self.n_gpu_layers
-    }
-
-    /// 启用/禁用 KV Cache
-    pub fn set_kv_cache(&mut self, enabled: bool) {
-        self.use_kv_cache = enabled;
-        eprintln!("[优化] KV Cache: {}", if enabled { "启用" } else { "禁用" });
-    }
-
-    /// 获取 KV Cache 状态
-    pub fn get_kv_cache(&self) -> bool {
-        self.use_kv_cache
-    }
-
-    /// 设置 KV Cache 大小
-    pub fn set_kv_cache_size(&mut self, size: u32) {
-        self.kv_cache_size = size.max(512); // 最小 512 tokens
-        eprintln!("[优化] KV Cache 大小: {} tokens", self.kv_cache_size);
-    }
-
-    /// 获取 KV Cache 大小
-    pub fn get_kv_cache_size(&self) -> u32 {
-        self.kv_cache_size
-    }
-
-    /// 获取上下文大小
-    pub fn get_ctx_size(&self) -> u32 {
-        self.ctx_size
-    }
-
-    /// 设置上下文大小
-    pub fn set_ctx_size(&mut self, size: u32) {
-        self.ctx_size = size;
-    }
-
-    /// 设置模型名称
-    pub fn set_model_name(&mut self, name: String) {
-        self.model_name = name;
-    }
-
-    /// 检查模型是否已加载
-    pub fn is_model_loaded(&self) -> bool {
-        self.model.lock().map(|g| g.is_some()).unwrap_or(false)
-    }
-
-    /// 从路径提取模型名称
-    pub fn set_model_name_from_path(&mut self, path: &str) {
-        let name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        self.model_name = name.clone();
-
-        // 自动检测并设置prompt格式
-        self.fmt = crate::chat::detect_format(&name);
-        eprintln!("[INFO] 检测到模型格式: {:?}", self.fmt);
-    }
-
-    /// 停止当前推理
-    pub fn stop(&self) {
-        self.abort_flag.store(true, Ordering::SeqCst);
-    }
-
-    /// 重置中断标志（开始新推理前调用）
-    pub fn reset_abort(&self) {
-        self.abort_flag.store(false, Ordering::SeqCst);
-    }
-
-    /// 检查是否请求中断
-    pub fn is_abort_requested(&self) -> bool {
-        self.abort_flag.load(Ordering::SeqCst)
-    }
-}
-
-impl InferenceBackend for LlamaCppEngine {
-    fn load_model(&self, path: &str) -> anyhow::Result<()> {
-        // 优化的模型加载参数
-        // use_mmap: 使用内存映射，减少内存占用
-        // use_mlock: 锁定内存，防止 swap（需要 root 权限）
-        // n_gpu_layers: GPU 层数（0=仅CPU, -1=所有层到GPU）
-        // vocab_only: 仅加载词汇表（用于测试）
-        let params = LlamaModelParams::default()
-            .with_n_gpu_layers(self.n_gpu_layers as u32)  // 可配置 GPU 层数
-            .with_use_mmap(true)                        // 启用内存映射（节省内存）
-            .with_use_mlock(false)                      // 禁用内存锁定（兼容性更好）
-            .with_vocab_only(false);                    // 加载完整模型
-
-        eprintln!("[模型] 正在加载模型: {}", path);
-        eprintln!("[模型] 配置: GPU层数={}, MMAP={}, MLOCK={}, KV Cache={}",
-            self.n_gpu_layers, true, false, self.use_kv_cache);
-
-        let model = LlamaModel::load_from_file(&self.backend, path, &params)
-            .map_err(|e| anyhow::anyhow!("模型加载失败: {}\n\n请检查:\n1. 模型文件路径是否正确\n2. 模型文件是否损坏\n3. 是否有足够的内存", e))?;
-
-        let mut model_guard = self.model.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-        *model_guard = Some(Arc::new(model));
-
-        eprintln!("[模型] 加载成功");
-        Ok(())
-    }
-
-    fn generate_stream<F>(&self, messages: Vec<Message>, on_token: F) -> anyhow::Result<()>
-    where
-        F: Fn(String) + Send + Sync + 'static,
-    {
-        let model_guard = self.model.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-        let model = model_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("模型未加载"))?
-            .clone();
-        drop(model_guard);
-
-        let backend = self.backend.clone();
-        let n_threads = self.n_threads;
-        let ctx_size = self.ctx_size;
-        let fmt = self.fmt.clone();
-        let prompt = build_prompt(&fmt, &messages);
-
-        // 使用默认推理参数
-        let params = InferenceParams::default();
-
-        // 直接在当前线程运行推理任务
-        // 注意：这是一个阻塞调用，应该在异步上下文中通过 spawn_blocking 调用此方法
-        run_inference_stream(&model, &backend, &prompt, params, n_threads, ctx_size, on_token)
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    }
-
-    fn list_models(&self) -> anyhow::Result<Vec<crate::backend::ModelInfo>> {
-        let mut models = Vec::new();
-
-        // 获取模型目录
-        let model_dirs = get_model_directories();
-
-        for dir in model_dirs {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "gguf").unwrap_or(false) {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            let size_gb = entry.metadata()
-                                .map(|m| m.len() as f32 / 1_073_741_824.0)
-                                .unwrap_or(0.0);
-
-                            // 尝试从文件名推断参数
-                            let parameters = infer_parameters(name);
-
-                            models.push(crate::backend::ModelInfo {
-                                name: name.to_string(),
-                                path: path.to_string_lossy().to_string(),
-                                size_gb,
-                                parameters,
-                            });
-                        }
-                    }
-                }
+        pub fn set_model_name_from_path(&mut self, path: &str) {
+            if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
+                self.model_name = name.to_string();
+                self.fmt = crate::chat::detect_format(&self.model_name);
             }
         }
 
-        Ok(models)
-    }
+        pub fn set_model_path(&mut self, path: &str) {
+            self.model_path = Some(path.to_string());
+            self.set_model_name_from_path(path);
+        }
 
-    fn system_info(&self) -> serde_json::Value {
-        serde_json::json!({
-            "n_threads":        self.n_threads,
-            "physical_cores":   num_cpus::get_physical(),
-            "logical_cores":    num_cpus::get(),
-            "ctx_size":         self.ctx_size,
-            "gpu_acceleration": false,
-        })
-    }
-}
+        pub fn is_model_loaded(&self) -> bool {
+            *self.model_loaded.lock().unwrap_or_else(|p| p.into_inner())
+        }
 
-/// 获取可能的模型目录列表
-#[allow(dead_code)]
-fn get_model_directories() -> Vec<std::path::PathBuf> {
-    let mut directories = Vec::new();
+        pub fn stop(&self) {
+            self.abort_flag.store(true, Ordering::SeqCst);
+        }
 
-    // 用户目录下的 LocalMind/models
-    if let Some(home) = dirs::home_dir() {
-        directories.push(home.join("LocalMind").join("models"));
-    }
+        pub fn reset_abort(&self) {
+            self.abort_flag.store(false, Ordering::SeqCst);
+        }
 
-    // 下载目录
-    if let Some(downloads) = dirs::download_dir() {
-        directories.push(downloads);
-    }
+        pub fn is_abort_requested(&self) -> bool {
+            self.abort_flag.load(Ordering::SeqCst)
+        }
 
-    // 当前目录
-    directories.push(std::path::PathBuf::from("."));
+        pub fn get_gpu_layers(&self) -> u32 {
+            0
+        }
 
-    // Windows 上的常见位置
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(documents) = dirs::document_dir() {
-            directories.push(documents.join("LocalMind").join("models"));
+        pub fn generate_stream_with_params<F>(
+            &self,
+            messages: Vec<Message>,
+            params: InferenceParams,
+            on_token: F,
+        ) -> anyhow::Result<()>
+        where
+            F: Fn(String) + Send + Sync + 'static,
+        {
+            eprintln!("[推理] generate_stream 开始");
+            self.reset_abort();
+
+            if !self.is_model_loaded() {
+                eprintln!("[推理] 错误: 模型未加载");
+                return Err(anyhow::anyhow!("模型未加载"));
+            }
+
+            let model_guard = self
+                .model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("模型锁获取失败: {}", e))?;
+            let model = model_guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("模型未初始化"))?;
+
+            let prompt = crate::chat::build_prompt(&self.fmt, &messages);
+            eprintln!("[推理] 提示词:\n{}", prompt);
+
+            let tokens = model
+                .str_to_token(&prompt, AddBos::Always)
+                .map_err(|e| anyhow::anyhow!("分词失败: {}", e))?;
+
+            if tokens.is_empty() {
+                eprintln!("[推理] 错误: 分词结果为空");
+                return Err(anyhow::anyhow!("分词结果为空"));
+            }
+
+            eprintln!("[推理] 提示词长度: {} tokens", tokens.len());
+
+            let ctx_params = LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new(self.ctx_size))
+                .with_n_threads(self.n_threads as i32)
+                .with_n_threads_batch(self.n_threads as i32);
+
+            let mut ctx = model
+                .new_context(&self.backend, ctx_params)
+                .map_err(|e| anyhow::anyhow!("上下文创建失败: {}", e))?;
+
+            let mut sampler = build_sampler(&params);
+            let abort = self.abort_flag.clone();
+            let max_tokens = params.max_tokens.max(1) as usize;
+
+            {
+                let mut batch = LlamaBatch::new(tokens.len(), 1);
+                for (i, token) in tokens.iter().enumerate() {
+                    let is_last = i == tokens.len() - 1;
+                    if let Err(e) = batch.add(*token, i as i32, &[0], is_last) {
+                        eprintln!("[推理] Batch 添加 token {} 失败: {}", i, e);
+                        return Err(anyhow::anyhow!("Batch 添加失败: {}", e));
+                    }
+                }
+                eprintln!("[推理] 开始解码提示词...");
+                if let Err(e) = ctx.decode(&mut batch) {
+                    eprintln!("[推理] 提示词解码失败: {}", e);
+                    return Err(anyhow::anyhow!("提示词解码失败: {}", e));
+                }
+                eprintln!("[推理] 提示词解码成功");
+            }
+
+            for token in &tokens {
+                sampler.accept(*token);
+            }
+
+            let mut n_cur = 0usize;
+            let mut last_position = (tokens.len() - 1) as i32;
+
+            loop {
+                if n_cur >= max_tokens {
+                    eprintln!("[推理] 达到最大 tokens 数 {}", max_tokens);
+                    break;
+                }
+                if abort.load(Ordering::SeqCst) {
+                    eprintln!("[推理] 被中止");
+                    break;
+                }
+
+                let token_to_generate = sampler.sample(&ctx, last_position);
+                eprintln!(
+                    "[推理] Loop {}: 采样 token ID: {} at pos {}",
+                    n_cur, token_to_generate, last_position
+                );
+
+                if model.is_eog_token(token_to_generate) {
+                    eprintln!("[推理] 遇到 EOS token");
+                    break;
+                }
+
+                let mut decoder = UTF_8.new_decoder();
+                match model.token_to_piece(token_to_generate, &mut decoder, false, None) {
+                    Ok(token_str) => {
+                        if token_str.is_empty() {
+                            eprintln!("[推理] 收到空字符串，结束");
+                            break;
+                        }
+                        eprintln!("[推理] 发送 token: {:?}", token_str);
+                        on_token(token_str);
+                    }
+                    Err(e) => {
+                        eprintln!("[推理] token_to_piece 失败: {}", e);
+                        break;
+                    }
+                }
+
+                sampler.accept(token_to_generate);
+                n_cur += 1;
+
+                let batch_pos = last_position + 1;
+                let mut batch = LlamaBatch::new(1, 1);
+                if let Err(e) = batch.add(token_to_generate, batch_pos, &[0], true) {
+                    eprintln!("[推理] Batch 添加失败: {}", e);
+                    return Err(anyhow::anyhow!("Batch 添加失败: {}", e));
+                }
+
+                if let Err(e) = ctx.decode(&mut batch) {
+                    eprintln!("[推理] decode 返回错误: {:?}", e);
+                    break;
+                }
+
+                last_position = batch_pos;
+            }
+
+            eprintln!("[推理] 生成完成，共 {} tokens", n_cur);
+            on_token(String::new());
+            Ok(())
         }
     }
 
-    directories
-}
-
-/// 从文件名推断模型参数量
-#[allow(dead_code)]
-fn infer_parameters(filename: &str) -> String {
-    let lower = filename.to_lowercase();
-
-    // 尝试从文件名中提取参数量
-    if lower.contains("0.5b") {
-        "0.5B".to_string()
-    } else if lower.contains("1b") {
-        "1B".to_string()
-    } else if lower.contains("1.5b") {
-        "1.5B".to_string()
-    } else if lower.contains("2b") {
-        "2B".to_string()
-    } else if lower.contains("3b") {
-        "3B".to_string()
-    } else if lower.contains("4b") {
-        "4B".to_string()
-    } else if lower.contains("7b") {
-        "7B".to_string()
-    } else if lower.contains("8b") {
-        "8B".to_string()
-    } else if lower.contains("13b") {
-        "13B".to_string()
-    } else if lower.contains("14b") {
-        "14B".to_string()
-    } else if lower.contains("32b") {
-        "32B".to_string()
-    } else if lower.contains("34b") {
-        "34B".to_string()
-    } else if lower.contains("70b") {
-        "70B".to_string()
-    } else if lower.contains("405b") {
-        "405B".to_string()
-    } else {
-        "Unknown".to_string()
-    }
-}
-
-/// 量化格式信息
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct QuantInfo {
-    pub format: String,
-    pub recommended: bool,
-    pub size_note: String,
-}
-
-/// 从模型文件名推断量化格式
-#[allow(dead_code)]
-pub fn infer_quant_format(name: &str) -> QuantInfo {
-    let formats = [
-        ("Q4_K_M", true, "推荐 - 最佳平衡，速度和精度兼顾"),
-        ("Q5_K_M", true, "推荐 - 更高精度，速度略慢"),
-        ("Q6_K", true, "高精度模式，接近原版质量"),
-        ("Q8_0", false, "最高精度，需更多内存"),
-        ("Q4_K_S", true, "较小体积，速度较快"),
-        ("Q5_K_S", true, "中等体积和速度"),
-        ("Q3_K_M", false, "轻量级，质量略有下降"),
-        ("Q3_K_S", false, "超轻量级，仅推荐草稿模型"),
-        ("Q2_K", false, "最小体积，仅推荐草稿模型"),
-        ("F16", false, "半精度浮点，需 16GB+ 内存"),
-        ("F32", false, "全精度，不推荐"),
-    ];
-
-    let upper = name.to_uppercase();
-    for (fmt, rec, note) in &formats {
-        if upper.contains(fmt) {
-            return QuantInfo {
-                format: fmt.to_string(),
-                recommended: *rec,
-                size_note: note.to_string(),
-            };
+    impl Drop for LlamaCppEngine {
+        fn drop(&mut self) {
+            if let Ok(mut model_guard) = self.model.lock() {
+                model_guard.take();
+            }
         }
     }
 
-    QuantInfo {
-        format: "UNKNOWN".to_string(),
-        recommended: false,
-        size_note: "未知格式".to_string(),
+    impl InferenceBackend for LlamaCppEngine {
+        fn load_model(&self, path: &str) -> anyhow::Result<()> {
+            if !Path::new(path).exists() {
+                return Err(anyhow::anyhow!("模型文件不存在: {}", path));
+            }
+
+            let model_params = LlamaModelParams::default();
+            let model = LlamaModel::load_from_file(&self.backend, path, &model_params)
+                .map_err(|e| anyhow::anyhow!("模型加载失败: {}", e))?;
+
+            if let Ok(mut model_guard) = self.model.lock() {
+                *model_guard = Some(model);
+            }
+
+            if let Ok(mut loaded) = self.model_loaded.lock() {
+                *loaded = true;
+            }
+
+            Ok(())
+        }
+
+        fn generate_stream<F>(&self, messages: Vec<Message>, on_token: F) -> anyhow::Result<()>
+        where
+            F: Fn(String) + Send + Sync + 'static,
+        {
+            self.generate_stream_with_params(messages, InferenceParams::default(), on_token)
+        }
+
+        fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+            if self.is_model_loaded() {
+                let path = self
+                    .model_path
+                    .clone()
+                    .unwrap_or_else(|| self.model_name.clone());
+                let size_gb = Path::new(&path)
+                    .metadata()
+                    .map(|m| m.len() as f32 / 1024.0 / 1024.0 / 1024.0)
+                    .unwrap_or(0.0);
+
+                Ok(vec![ModelInfo {
+                    name: self.model_name.clone(),
+                    path,
+                    size_gb,
+                    parameters: "unknown".to_string(),
+                }])
+            } else {
+                Ok(vec![])
+            }
+        }
+
+        fn system_info(&self) -> serde_json::Value {
+            serde_json::json!({
+                "n_threads": self.n_threads,
+                "physical_cores": num_cpus::get_physical(),
+                "logical_cores": num_cpus::get(),
+                "ctx_size": self.ctx_size,
+                "gpu_acceleration": false,
+                "llama_version": "llama-cpp-2",
+                "native_backend_available": true,
+            })
+        }
+    }
+
+    impl LlamaCppEngine {
+        pub fn set_kv_cache(&mut self, _enabled: bool) {}
+
+        pub fn get_kv_cache(&self) -> bool {
+            true
+        }
+
+        pub fn set_kv_cache_size(&mut self, _size: u32) {}
+
+        pub fn get_kv_cache_size(&self) -> u32 {
+            self.ctx_size
+        }
+    }
+
+    fn build_sampler(params: &InferenceParams) -> LlamaSampler {
+        let temperature = params.temperature.clamp(0.0, 2.0);
+        let top_k = params.top_k.max(1);
+        let top_p = params.top_p.clamp(0.0, 1.0);
+        let mut samplers = Vec::new();
+
+        if params.repeat_penalty > 1.0 {
+            samplers.push(LlamaSampler::penalties(-1, params.repeat_penalty, 0.0, 0.0));
+        }
+
+        if temperature <= f32::EPSILON {
+            samplers.push(LlamaSampler::greedy());
+            return LlamaSampler::chain_simple(samplers);
+        }
+
+        samplers.push(LlamaSampler::temp(temperature));
+
+        samplers.push(LlamaSampler::top_k(top_k));
+
+        if top_p < 1.0 {
+            samplers.push(LlamaSampler::top_p(top_p, 1));
+        }
+
+        samplers.push(LlamaSampler::dist(random_seed()));
+        LlamaSampler::chain_simple(samplers)
+    }
+
+    fn random_seed() -> u32 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.subsec_nanos())
+            .unwrap_or(0)
     }
 }
 
-/// 投机采样引擎（可选功能）
-/// 使用小模型快速生成候选 tokens，大模型验证，加速推理
-#[allow(dead_code)]
-pub struct SpeculativeEngine {
-    pub backend:      Arc<LlamaBackend>,
-    pub main_model:   Arc<Mutex<Option<Arc<LlamaModel>>>>,
-    pub draft_model:  Arc<Mutex<Option<Arc<LlamaModel>>>>,  // 草稿模型（可选）
-    pub n_threads:    u32,
-    pub ctx_size:     u32,
-    pub n_draft:      u32,   // 每次草稿生成的 token 数，建议 4-8
-    pub abort_flag:   Arc<AtomicBool>,
+#[cfg(not(feature = "llama-cpp-2"))]
+mod imp {
+    use super::*;
+
+    /// 无原生 llama 支持时的占位实现，用于让桌面壳和前端流程可编译。
+    pub struct LlamaCppEngine {
+        pub n_threads: u32,
+        pub ctx_size: u32,
+        pub fmt: PromptFormat,
+        pub api_port: u16,
+        pub model_name: String,
+        pub model_path: Option<String>,
+        pub abort_flag: Arc<AtomicBool>,
+        pub model_loaded: Arc<Mutex<bool>>,
+        kv_cache_enabled: bool,
+        kv_cache_size: u32,
+    }
+
+    impl LlamaCppEngine {
+        pub fn new() -> anyhow::Result<Self> {
+            Self::with_config(2048, PromptFormat::ChatML)
+        }
+
+        pub fn with_config(ctx_size: u32, fmt: PromptFormat) -> anyhow::Result<Self> {
+            let ctx_size = ctx_size.max(64);
+
+            Ok(Self {
+                n_threads: num_cpus::get_physical() as u32,
+                ctx_size,
+                fmt,
+                api_port: 8080,
+                model_name: String::new(),
+                model_path: None,
+                abort_flag: Arc::new(AtomicBool::new(false)),
+                model_loaded: Arc::new(Mutex::new(false)),
+                kv_cache_enabled: true,
+                kv_cache_size: ctx_size,
+            })
+        }
+
+        pub fn set_threads(&mut self, n: u32) {
+            self.n_threads = n;
+        }
+
+        pub fn get_threads(&self) -> u32 {
+            self.n_threads
+        }
+
+        pub fn set_ctx_size(&mut self, s: u32) {
+            let ctx_size = s.max(64);
+            self.ctx_size = ctx_size;
+            self.kv_cache_size = ctx_size;
+        }
+
+        pub fn get_ctx_size(&self) -> u32 {
+            self.ctx_size
+        }
+
+        pub fn set_model_name(&mut self, n: String) {
+            self.model_name = n;
+        }
+
+        pub fn set_model_name_from_path(&mut self, path: &str) {
+            if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
+                self.model_name = name.to_string();
+                self.fmt = crate::chat::detect_format(&self.model_name);
+            }
+        }
+
+        pub fn set_model_path(&mut self, path: &str) {
+            self.model_path = Some(path.to_string());
+            self.set_model_name_from_path(path);
+        }
+
+        pub fn is_model_loaded(&self) -> bool {
+            *self.model_loaded.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        pub fn stop(&self) {
+            self.abort_flag.store(true, Ordering::SeqCst);
+        }
+
+        pub fn reset_abort(&self) {
+            self.abort_flag.store(false, Ordering::SeqCst);
+        }
+
+        pub fn is_abort_requested(&self) -> bool {
+            self.abort_flag.load(Ordering::SeqCst)
+        }
+
+        pub fn get_gpu_layers(&self) -> u32 {
+            0
+        }
+
+        pub fn generate_stream_with_params<F>(
+            &self,
+            _messages: Vec<Message>,
+            _params: InferenceParams,
+            _on_token: F,
+        ) -> anyhow::Result<()>
+        where
+            F: Fn(String) + Send + Sync + 'static,
+        {
+            Err(anyhow::anyhow!(
+                "当前构建未启用原生 llama 后端。请使用 `cargo build --no-default-features --features llama-cpp-2` 重新构建，并确保系统已安装 cmake。"
+            ))
+        }
+
+        pub fn set_kv_cache(&mut self, enabled: bool) {
+            self.kv_cache_enabled = enabled;
+        }
+
+        pub fn get_kv_cache(&self) -> bool {
+            self.kv_cache_enabled
+        }
+
+        pub fn set_kv_cache_size(&mut self, size: u32) {
+            self.kv_cache_size = size.max(64);
+        }
+
+        pub fn get_kv_cache_size(&self) -> u32 {
+            self.kv_cache_size
+        }
+    }
+
+    impl InferenceBackend for LlamaCppEngine {
+        fn load_model(&self, path: &str) -> anyhow::Result<()> {
+            if !Path::new(path).exists() {
+                return Err(anyhow::anyhow!("模型文件不存在: {}", path));
+            }
+
+            Err(anyhow::anyhow!(
+                "当前构建未启用原生 llama 后端。请使用 `cargo build --no-default-features --features llama-cpp-2` 重新构建，并确保系统已安装 cmake。"
+            ))
+        }
+
+        fn generate_stream<F>(&self, messages: Vec<Message>, on_token: F) -> anyhow::Result<()>
+        where
+            F: Fn(String) + Send + Sync + 'static,
+        {
+            self.generate_stream_with_params(messages, InferenceParams::default(), on_token)
+        }
+
+        fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+
+        fn system_info(&self) -> serde_json::Value {
+            serde_json::json!({
+                "n_threads": self.n_threads,
+                "physical_cores": num_cpus::get_physical(),
+                "logical_cores": num_cpus::get(),
+                "ctx_size": self.ctx_size,
+                "gpu_acceleration": false,
+                "llama_version": "disabled",
+                "native_backend_available": false,
+                "native_backend_feature": "llama-cpp-2",
+                "build_features": {
+                    "llama-cpp-2": cfg!(feature = "llama-cpp-2"),
+                    "no_llama": cfg!(feature = "no_llama"),
+                }
+            })
+        }
+    }
 }
 
-#[allow(dead_code)]
-impl SpeculativeEngine {
-    pub fn new() -> anyhow::Result<Self> {
-        let backend = LlamaBackend::init()?;
-        let physical_cores = num_cpus::get_physical() as u32;
-        let n_threads = physical_cores.min(4); // 投机采样可以用更多线程
-        Ok(Self {
-            backend:     Arc::new(backend),
-            main_model:  Arc::new(Mutex::new(None)),
-            draft_model: Arc::new(Mutex::new(None)),
-            n_threads,
-            ctx_size:    2048,
-            n_draft:     5,   // 每轮草稿 5 个 token
-            abort_flag:  Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    /// 加载主模型和草稿模型（草稿模型可选）
-    pub fn load_main_model(&self, path: &str) -> anyhow::Result<()> {
-        let params = LlamaModelParams::default()
-            .with_n_gpu_layers(0)
-            .with_use_mmap(true);
-        let model = LlamaModel::load_from_file(&self.backend, path, &params)?;
-
-        let mut model_guard = self.main_model.lock()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        *model_guard = Some(Arc::new(model));
-        Ok(())
-    }
-
-    /// 加载草稿模型（可选）
-    pub fn load_draft_model(&self, path: &str) -> anyhow::Result<()> {
-        let params = LlamaModelParams::default()
-            .with_n_gpu_layers(0)
-            .with_use_mmap(true);
-        let model = LlamaModel::load_from_file(&self.backend, path, &params)?;
-
-        let mut model_guard = self.draft_model.lock()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        *model_guard = Some(Arc::new(model));
-        Ok(())
-    }
-
-    /// 检查是否已加载草稿模型
-    pub fn has_draft_model(&self) -> bool {
-        self.draft_model.lock()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
-    }
-
-    /// 停止推理
-    pub fn stop(&self) {
-        self.abort_flag.store(true, Ordering::SeqCst);
-    }
-}
+pub use imp::LlamaCppEngine;

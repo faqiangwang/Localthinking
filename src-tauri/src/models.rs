@@ -1,7 +1,7 @@
 // src-tauri/src/models.rs
 use futures_util::StreamExt;
-use tauri::{AppHandle, Emitter, Manager, Window};
 use std::io::Write;
+use tauri::{AppHandle, Emitter, Manager, Window};
 
 /// 下载进度更新间隔（毫秒）
 const PROGRESS_UPDATE_INTERVAL_MS: u128 = 200;
@@ -9,7 +9,9 @@ const PROGRESS_UPDATE_INTERVAL_MS: u128 = 200;
 /// 获取模型下载目录（应用数据目录下的 models 文件夹）
 pub fn get_models_dir(app: &AppHandle) -> std::path::PathBuf {
     // 使用 map_err 来处理可能的错误，返回默认路径
-    let data_dir = app.path().app_data_dir()
+    let data_dir = app
+        .path()
+        .app_data_dir()
         .map_err(|e| eprintln!("警告: 无法获取应用数据目录: {}", e))
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let models_dir = data_dir.join("models");
@@ -20,7 +22,12 @@ pub fn get_models_dir(app: &AppHandle) -> std::path::PathBuf {
     models_dir
 }
 
-pub async fn download_model(url: String, filename: String, app: AppHandle, window: Window) -> anyhow::Result<String> {
+pub async fn download_model(
+    url: String,
+    filename: String,
+    app: AppHandle,
+    window: Window,
+) -> anyhow::Result<String> {
     eprintln!("[下载] 请求参数: url={}, filename={}", url, filename);
 
     let client = reqwest::Client::builder()
@@ -42,7 +49,9 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
     let mut response = None;
     if downloaded_size > 0 {
         eprintln!("[下载] 尝试断点续传...");
-        let req_range = client.get(&url).header("Range", format!("bytes={}-", downloaded_size));
+        let req_range = client
+            .get(&url)
+            .header("Range", format!("bytes={}-", downloaded_size));
         match req_range.send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -53,7 +62,10 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
                     response = Some(resp);
                 } else {
                     // 服务器不支持 Range，删除不完整的文件，重新下载
-                    eprintln!("[WARN] 服务器不支持断点续传 (状态码 {})，将从头开始下载", status.as_u16());
+                    eprintln!(
+                        "[WARN] 服务器不支持断点续传 (状态码 {})，将从头开始下载",
+                        status.as_u16()
+                    );
                     let _ = std::fs::remove_file(&dest);
                     downloaded_size = 0;
                 }
@@ -121,11 +133,15 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
             eprintln!("[清理] 无法获取文件大小，删除不完整的文件: {}", dest_str);
             let _ = std::fs::remove_file(&dest);
         }
-        return Err(anyhow::anyhow!("无法获取文件大小，服务器未返回 Content-Length"));
+        return Err(anyhow::anyhow!(
+            "无法获取文件大小，服务器未返回 Content-Length"
+        ));
     }
 
-    eprintln!("[下载] 开始下载: 文件={}, 总大小={} bytes, 已下载={} bytes, 剩余={} bytes",
-        filename, total, downloaded_size, content_length);
+    eprintln!(
+        "[下载] 开始下载: 文件={}, 总大小={} bytes, 已下载={} bytes, 剩余={} bytes",
+        filename, total, downloaded_size, content_length
+    );
 
     // 检查文件是否可写
     let mut file = std::fs::OpenOptions::new()
@@ -154,10 +170,7 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
                 eprintln!("[清理] 下载中断，删除不完整的文件: {}", dest_str);
                 let _ = std::fs::remove_file(&dest);
             }
-            anyhow::anyhow!(
-                "下载中断: {}\n\n建议重新下载",
-                e
-            )
+            anyhow::anyhow!("下载中断: {}\n\n建议重新下载", e)
         })?;
         file.write_all(&chunk).map_err(|e| {
             // 写入失败时，清理损坏的文件
@@ -165,16 +178,16 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
                 eprintln!("[清理] 写入失败，删除损坏的文件: {}", dest_str);
                 let _ = std::fs::remove_file(&dest);
             }
-            anyhow::anyhow!(
-                "写入文件失败: {}\n\n请检查磁盘空间",
-                e
-            )
+            anyhow::anyhow!("写入文件失败: {}\n\n请检查磁盘空间", e)
         })?;
         done += chunk.len() as u64;
 
         // 验证进度：done 不应超过 total
         if done > total {
-            eprintln!("[警告] 下载进度异常: done({}) > total({}), 可能是服务器返回的文件大小不准确", done, total);
+            eprintln!(
+                "[警告] 下载进度异常: done({}) > total({}), 可能是服务器返回的文件大小不准确",
+                done, total
+            );
             // 修正 total 值
             let corrected_total = done;
             // 限制 emit 频率
@@ -194,16 +207,20 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
         } else {
             // 限制 emit 频率
             if last_emit.elapsed().as_millis() > PROGRESS_UPDATE_INTERVAL_MS {
-                let percent = if total > 0 { (done as f64 / total as f64 * 100.0) as u32 } else { 0 };
+                let percent = if total > 0 {
+                    (done as f64 / total as f64 * 100.0) as u32
+                } else {
+                    0
+                };
                 eprintln!("[下载] 进度: {} / {} ({}%)", done, total, percent);
                 if let Err(e) = window.emit(
-                        "model://progress",
-                        serde_json::json!({
-                            "downloaded": done,
-                            "total":      total,
-                            "percent":    percent,
-                        }),
-                    ) {
+                    "model://progress",
+                    serde_json::json!({
+                        "downloaded": done,
+                        "total":      total,
+                        "percent":    percent,
+                    }),
+                ) {
                     eprintln!("警告: 无法发送下载进度: {}", e);
                 }
                 last_emit = std::time::Instant::now();
@@ -211,11 +228,11 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
         }
     }
     if let Err(e) = window.emit(
-            "model://progress",
-            serde_json::json!({
-                "downloaded": done, "total": total, "percent": 100
-            }),
-        ) {
+        "model://progress",
+        serde_json::json!({
+            "downloaded": done, "total": total, "percent": 100
+        }),
+    ) {
         eprintln!("警告: 无法发送最终进度: {}", e);
     }
 
@@ -224,7 +241,10 @@ pub async fn download_model(url: String, filename: String, app: AppHandle, windo
     if let Ok(meta) = metadata {
         let actual_size = meta.len();
         if actual_size != total {
-            eprintln!("[错误] 下载完成但文件大小不匹配: 期望 {}, 实际 {}", total, actual_size);
+            eprintln!(
+                "[错误] 下载完成但文件大小不匹配: 期望 {}, 实际 {}",
+                total, actual_size
+            );
             // 文件大小不匹配，删除损坏的文件
             eprintln!("[清理] 文件大小不匹配，删除损坏的文件: {}", dest_str);
             let _ = std::fs::remove_file(&dest);

@@ -1,2 +1,7 @@
 [env]
-CXXFLAGS = "/utf-8"
+CXXFLAGS = ""
+CFLAGS = ""
+CXX = ""
+CC = ""
+
+# Temporary: ensure cargo runs for this workspace don't inherit stray C/C++ envs

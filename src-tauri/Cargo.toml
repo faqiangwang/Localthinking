@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["no_llama"]
 debug = []
+llama-cpp-2 = ["dep:llama-cpp-2"]
+no_llama = []
 
 [lib]
 name = "local_thinking_lib"
@@ -18,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 tauri            = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-llama-cpp-2     = { version = "0.1", features = ["sampler"] }
+llama-cpp-2     = { version = "0.1", features = ["sampler"], optional = true }
 encoding_rs     = "0.8"           # 用于 token 转字符串的编码器
 tokio           = { version = "1", features = ["full"] }
 serde           = { version = "1", features = ["derive"] }
@@ -41,3 +43,17 @@ codegen-units = 1               # 单编译单元，最大化优化
 opt-level     = 3               # 最高优化级别
 strip         = true            # 移除符号表，减小二进制大小
 panic         = "abort"         # 减小二进制大小
+
+# When building without native llama support (default), the optional
+# `llama-cpp-2` dependency is disabled so we can compile the application
+# shell without requiring CMake / a full native toolchain. To enable full
+# native support, build with:
+# `cargo build --no-default-features --features llama-cpp-2`
+# and ensure `cmake` is installed on the system.
+
+## [patch.crates-io]
+## When you place a local copy of the llama-cpp-2 (llama.cpp based) source
+## into `src-tauri/vendor/llama-cpp-2`, Cargo will use the local path for
+## the `llama-cpp-2` crate. This is useful for offline patching and testing.
+## To enable, uncomment the following lines after placing the vendor source.
+## llama-cpp-2 = { path = "vendor/llama-cpp-2" }

@@ -1,7 +1,15 @@
 // src/components/PerformanceMonitor.tsx
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import styles from "./PerformanceMonitor.module.css";
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import styles from './PerformanceMonitor.module.css';
+
+interface CacheStats {
+  entries: number;
+  total_hits: number;
+  max_size: number;
+  avg_hits: number;
+  ttl_seconds: number;
+}
 
 interface PerformanceStats {
   threads: number;
@@ -9,6 +17,7 @@ interface PerformanceStats {
   gpu_layers: number;
   gpu_enabled: boolean;
   estimated_memory_mb: number;
+  cache: CacheStats;
 }
 
 interface OptimizationSuggestions {
@@ -25,6 +34,8 @@ export function PerformanceMonitor() {
   const [stats, setStats] = useState<PerformanceStats | null>(null);
   const [suggestions, setSuggestions] = useState<OptimizationSuggestions | null>(null);
   const [loading, setLoading] = useState(true);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     loadPerformanceData();
@@ -36,13 +47,13 @@ export function PerformanceMonitor() {
   const loadPerformanceData = async () => {
     try {
       const [statsData, suggestionsData] = await Promise.all([
-        invoke<PerformanceStats>("get_performance_stats"),
-        invoke<OptimizationSuggestions>("get_optimization_suggestions"),
+        invoke<PerformanceStats>('get_performance_stats'),
+        invoke<OptimizationSuggestions>('get_optimization_suggestions'),
       ]);
       setStats(statsData);
       setSuggestions(suggestionsData);
     } catch (error) {
-      console.error("加载性能数据失败:", error);
+      console.error('加载性能数据失败:', error);
     } finally {
       setLoading(false);
     }
@@ -51,6 +62,28 @@ export function PerformanceMonitor() {
   const formatBytes = (mb: number): string => {
     if (mb < 1024) return `${mb.toFixed(0)} MB`;
     return `${(mb / 1024).toFixed(2)} GB`;
+  };
+
+  const formatDuration = (seconds: number): string => {
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return remainingSeconds === 0 ? `${minutes} 分钟` : `${minutes} 分 ${remainingSeconds} 秒`;
+  };
+
+  const handleClearCache = async () => {
+    setClearingCache(true);
+    setActionMessage(null);
+
+    try {
+      await invoke('clear_inference_cache');
+      setActionMessage('推理缓存已清空');
+      await loadPerformanceData();
+    } catch (error) {
+      setActionMessage(String(error));
+    } finally {
+      setClearingCache(false);
+    }
   };
 
   if (loading) {
@@ -93,9 +126,7 @@ export function PerformanceMonitor() {
           </div>
           <div className={styles.metric}>
             <span className={styles.label}>GPU 状态</span>
-            <span className={styles.value}>
-              {stats.gpu_enabled ? "✅ 已启用" : "❌ 未启用"}
-            </span>
+            <span className={styles.value}>{stats.gpu_enabled ? '✅ 已启用' : '❌ 未启用'}</span>
           </div>
         </div>
       </div>
@@ -113,6 +144,39 @@ export function PerformanceMonitor() {
           </div>
           <span className={styles.value}>{formatBytes(stats.estimated_memory_mb)}</span>
         </div>
+      </div>
+
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <h4>缓存状态</h4>
+          <button
+            type="button"
+            className={styles.clearButton}
+            onClick={handleClearCache}
+            disabled={clearingCache || stats.cache.entries === 0}
+          >
+            {clearingCache ? '清理中...' : '清理缓存'}
+          </button>
+        </div>
+        <div className={styles.grid}>
+          <div className={styles.metric}>
+            <span className={styles.label}>缓存条目</span>
+            <span className={styles.value}>{stats.cache.entries}</span>
+          </div>
+          <div className={styles.metric}>
+            <span className={styles.label}>累计命中</span>
+            <span className={styles.value}>{stats.cache.total_hits}</span>
+          </div>
+          <div className={styles.metric}>
+            <span className={styles.label}>平均命中</span>
+            <span className={styles.value}>{stats.cache.avg_hits.toFixed(1)}</span>
+          </div>
+          <div className={styles.metric}>
+            <span className={styles.label}>缓存时长</span>
+            <span className={styles.value}>{formatDuration(stats.cache.ttl_seconds)}</span>
+          </div>
+        </div>
+        {actionMessage && <div className={styles.actionMessage}>{actionMessage}</div>}
       </div>
 
       {/* 优化建议 */}

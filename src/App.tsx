@@ -1,16 +1,16 @@
-import { useState, lazy, Suspense } from 'react';
+import { useState, lazy, Suspense, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Chat } from './components/Chat';
 import { useTheme } from './components/providers';
 import { ErrorBoundary } from './components/shared/ErrorBoundary';
+import { useSettingsStore } from './store';
 import './App.css';
 
 // 代码分割：延迟加载大型组件
 const ModelManager = lazy(() =>
-  import('./components/ModelManager').then((m) => ({ default: m.ModelManager }))
+  import('./components/ModelManager').then(m => ({ default: m.ModelManager }))
 );
-const Settings = lazy(() =>
-  import('./components/Settings').then((m) => ({ default: m.Settings }))
-);
+const Settings = lazy(() => import('./components/Settings').then(m => ({ default: m.Settings })));
 
 // 加载占位符组件
 function LoadingFallback() {
@@ -36,6 +36,38 @@ type Tab = 'chat' | 'models' | 'settings';
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('chat');
   const { resolvedTheme, setTheme } = useTheme();
+  const { settings, loaded } = useSettingsStore();
+  const runtimeSyncedRef = useRef(false);
+
+  useEffect(() => {
+    if (!loaded || runtimeSyncedRef.current) {
+      return;
+    }
+
+    runtimeSyncedRef.current = true;
+
+    const syncRuntimeSettings = async () => {
+      try {
+        await invoke('set_context_size', { size: settings.model_params.ctx_size });
+      } catch (error) {
+        console.warn('同步上下文大小失败:', error);
+      }
+
+      try {
+        await invoke('set_api_port', { port: settings.api_port });
+      } catch (error) {
+        console.warn('同步 API 端口失败:', error);
+      }
+
+      try {
+        await invoke('set_api_enabled', { enabled: settings.api_enabled });
+      } catch (error) {
+        console.warn('同步 API 开关失败:', error);
+      }
+    };
+
+    void syncRuntimeSettings();
+  }, [loaded, settings.api_enabled, settings.api_port, settings.model_params.ctx_size]);
 
   return (
     <div className="app">
@@ -98,18 +130,26 @@ function App() {
         {activeTab === 'models' && (
           <ErrorBoundary
             fallback={
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                height: '100%',
-                padding: '40px',
-                textAlign: 'center',
-                color: 'var(--color-text-secondary)',
-              }}>
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  height: '100%',
+                  padding: '40px',
+                  textAlign: 'center',
+                  color: 'var(--color-text-secondary)',
+                }}
+              >
                 <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
-                <h2 style={{ fontSize: '20px', marginBottom: '8px', color: 'var(--color-text-primary)' }}>
+                <h2
+                  style={{
+                    fontSize: '20px',
+                    marginBottom: '8px',
+                    color: 'var(--color-text-primary)',
+                  }}
+                >
                   模型管理加载失败
                 </h2>
                 <p style={{ marginBottom: '16px' }}>
