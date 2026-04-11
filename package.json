@@ -8,12 +8,16 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev:native": "tauri dev --features llama-cpp-2 -- --no-default-features",
+    "tauri:build:native": "tauri build --features llama-cpp-2 -- --no-default-features",
     "lint": "eslint src --ext ts,tsx",
     "lint:fix": "eslint src --ext ts,tsx --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx}\"",
     "test": "vitest",
     "test:run": "vitest run",
-    "release": "tauri build"
+    "release": "tauri build --features llama-cpp-2 -- --no-default-features",
+    "release:shell": "tauri build",
+    "release:app": "tauri build --bundles app --features llama-cpp-2 -- --no-default-features"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.23",

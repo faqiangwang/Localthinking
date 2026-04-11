@@ -119,13 +119,22 @@
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/faqiangwang/Localthinking.git
-cd Local-mind
+cd Localthinking
 
 # 2. 安装依赖
 npm install
 
-# 3. 运行应用
-npm run tauri dev
+# 3. 确保已安装 CMake
+cmake --version
+
+# 4. 运行原生 llama 后端版本
+npm run tauri:dev:native
+```
+
+打包可加载模型的桌面应用：
+
+```bash
+npm run release
 ```
 
 ### 首次使用

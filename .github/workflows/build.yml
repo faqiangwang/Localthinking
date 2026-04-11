@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          npm run tauri build -- --target "${{ matrix.target }}" 2>&1 | tee build.log
+          npm run tauri build -- --target "${{ matrix.target }}" --features llama-cpp-2 -- --no-default-features 2>&1 | tee build.log
 
       - name: Upload build log
         if: always()
