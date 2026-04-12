@@ -14,7 +14,7 @@ import {
   normalizeAppSettings,
 } from '../types';
 
-const SETTINGS_STORE_VERSION = 2;
+const SETTINGS_STORE_VERSION = 3;
 
 interface SettingsStore {
   // 状态

@@ -1,11 +1,18 @@
-import { ModelParams } from '../../types';
+import { AppSettings, ModelParams } from '../../types';
 
 interface ModelParamsCardProps {
   params: ModelParams;
+  flashAttention: AppSettings['flash_attention'];
   onParamChange: <K extends keyof ModelParams>(key: K, value: ModelParams[K]) => void;
+  onFlashAttentionChange: (value: AppSettings['flash_attention']) => void;
 }
 
-export function ModelParamsCard({ params, onParamChange }: ModelParamsCardProps) {
+export function ModelParamsCard({
+  params,
+  flashAttention,
+  onParamChange,
+  onFlashAttentionChange,
+}: ModelParamsCardProps) {
   return (
     <div className="settings-card">
       <h3>📐 模型参数</h3>
@@ -87,6 +94,24 @@ export function ModelParamsCard({ params, onParamChange }: ModelParamsCardProps)
         <div className="param-range">
           <span>更省内存</span>
           <span>更长上下文</span>
+        </div>
+      </div>
+
+      <div className="param-item">
+        <div className="param-header">
+          <span>Flash Attention</span>
+          <span className="param-value">{flashAttention}</span>
+        </div>
+        <select
+          value={flashAttention}
+          onChange={e => onFlashAttentionChange(e.target.value as AppSettings['flash_attention'])}
+        >
+          <option value="auto">Auto</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+        <div className="param-range">
+          <span>建议 GPU/Metal 保持 Auto 或 On</span>
         </div>
       </div>
     </div>

@@ -28,6 +28,7 @@ export function Settings() {
 
   const params = draftSettings.model_params;
   const systemPrompt = draftSettings.system_prompt;
+  const flashAttention = draftSettings.flash_attention;
   const apiEnabled = draftSettings.api_enabled;
   const apiPort = draftSettings.api_port;
 
@@ -109,7 +110,12 @@ export function Settings() {
         onApply={applyThreads}
       />
 
-      <ModelParamsCard params={params} onParamChange={updateDraftParam} />
+      <ModelParamsCard
+        params={params}
+        flashAttention={flashAttention}
+        onParamChange={updateDraftParam}
+        onFlashAttentionChange={value => updateDraftSettings({ flash_attention: value })}
+      />
 
       <VirtualMemoryCard
         vmLoading={vmLoading}

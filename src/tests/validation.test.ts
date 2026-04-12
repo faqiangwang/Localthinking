@@ -71,10 +71,22 @@ describe('类型验证函数', () => {
       expect(isValidAppSettings(invalid)).toBe(false);
     });
 
+    it('应该拒绝不支持的 flash_attention 值', () => {
+      const invalid = {
+        model_params: DEFAULT_MODEL_PARAMS,
+        system_prompt: 'test',
+        flash_attention: 'invalid',
+        api_enabled: true,
+        api_port: 8080,
+      };
+      expect(isValidAppSettings(invalid)).toBe(false);
+    });
+
     it('应该拒绝 api_port 类型错误', () => {
       const invalid = {
         model_params: DEFAULT_MODEL_PARAMS,
         system_prompt: 'test',
+        flash_attention: 'auto',
         api_enabled: true,
         api_port: '8080', // 应该是 number
       };
@@ -87,6 +99,7 @@ describe('类型验证函数', () => {
       const normalized = normalizeAppSettings({
         model_params: DEFAULT_MODEL_PARAMS,
         system_prompt: LEGACY_REASONING_SYSTEM_PROMPT,
+        flash_attention: 'auto',
         api_enabled: true,
         api_port: 8080,
       });
@@ -98,11 +111,24 @@ describe('类型验证函数', () => {
       const normalized = normalizeAppSettings({
         model_params: DEFAULT_MODEL_PARAMS,
         system_prompt: '请用一句话回答。',
+        flash_attention: 'off',
         api_enabled: true,
         api_port: 8080,
       });
 
       expect(normalized.system_prompt).toBe('请用一句话回答。');
+      expect(normalized.flash_attention).toBe('off');
+    });
+
+    it('应该将缺失的 flash_attention 迁移为 auto', () => {
+      const normalized = normalizeAppSettings({
+        model_params: DEFAULT_MODEL_PARAMS,
+        system_prompt: DEFAULT_SYSTEM_PROMPT,
+        api_enabled: true,
+        api_port: 8080,
+      });
+
+      expect(normalized.flash_attention).toBe('auto');
     });
   });
 

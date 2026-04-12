@@ -104,6 +104,10 @@ export function useSettingsRuntime({
         await invoke('set_context_size', { size: draftSettings.model_params.ctx_size });
       }
 
+      if (draftSettings.flash_attention !== settings.flash_attention) {
+        await invoke('set_flash_attention_policy', { mode: draftSettings.flash_attention });
+      }
+
       if (draftSettings.api_port !== settings.api_port) {
         await invoke('set_api_port', { port: draftSettings.api_port });
       }
@@ -118,7 +122,13 @@ export function useSettingsRuntime({
         setSettingsSaved(false);
         setSaveError(String(error));
       });
-  }, [draftSettings, settings.api_port, settings.model_params.ctx_size, updateSettings]);
+  }, [
+    draftSettings,
+    settings.api_port,
+    settings.flash_attention,
+    settings.model_params.ctx_size,
+    updateSettings,
+  ]);
 
   const resetAllSessions = useCallback(() => {
     if (window.confirm('确定要删除所有会话吗？这将清除所有对话历史，但会保留你的设置。')) {

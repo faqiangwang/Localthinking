@@ -48,6 +48,7 @@ pub fn run() {
             commands::stop_generation,
             commands::set_threads,
             commands::set_context_size,
+            commands::set_flash_attention_policy,
             commands::system_info,
             commands::download_model,
             commands::resolve_model_url,

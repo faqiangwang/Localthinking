@@ -16,19 +16,21 @@ interface PerformanceStats {
   context_size: number;
   gpu_layers: number;
   gpu_enabled: boolean;
+  flash_attention: 'auto' | 'on' | 'off';
   estimated_memory_mb: number;
   cache: CacheStats;
 }
 
 interface OptimizationSuggestions {
   suggestions: string[];
-  current_config: {
-    threads: number;
-    context_size: number;
-    gpu_layers: number;
-    physical_cores: number;
-  };
-}
+    current_config: {
+      threads: number;
+      context_size: number;
+      gpu_layers: number;
+      flash_attention: 'auto' | 'on' | 'off';
+      physical_cores: number;
+    };
+  }
 
 export function PerformanceMonitor() {
   const [stats, setStats] = useState<PerformanceStats | null>(null);
@@ -127,6 +129,10 @@ export function PerformanceMonitor() {
           <div className={styles.metric}>
             <span className={styles.label}>GPU 状态</span>
             <span className={styles.value}>{stats.gpu_enabled ? '✅ 已启用' : '❌ 未启用'}</span>
+          </div>
+          <div className={styles.metric}>
+            <span className={styles.label}>Flash Attention</span>
+            <span className={styles.value}>{stats.flash_attention}</span>
           </div>
         </div>
       </div>

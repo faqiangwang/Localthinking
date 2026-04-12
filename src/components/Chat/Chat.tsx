@@ -20,6 +20,9 @@ export function Chat() {
     streaming,
     error: chatError,
     tokPerSec,
+    promptTokPerSec,
+    firstTokenLatencyMs,
+    promptTokenCount,
     tokenCount,
     send,
     stop,
@@ -110,6 +113,9 @@ export function Chat() {
         modelError={modelError}
         modelParams={settings.model_params}
         tokPerSec={tokPerSec}
+        promptTokPerSec={promptTokPerSec}
+        firstTokenLatencyMs={firstTokenLatencyMs}
+        promptTokenCount={promptTokenCount}
         tokenCount={tokenCount}
         onNewSession={handleNewSession}
         onSend={handleSend}
@@ -129,6 +135,9 @@ export function Chat() {
           streaming={streaming}
           messages={messages}
           tokPerSec={tokPerSec}
+          promptTokPerSec={promptTokPerSec}
+          firstTokenLatencyMs={firstTokenLatencyMs}
+          promptTokenCount={promptTokenCount}
           tokenCount={tokenCount}
           modelError={modelError}
           chatError={error}

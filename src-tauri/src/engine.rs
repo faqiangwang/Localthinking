@@ -28,6 +28,38 @@ impl Default for InferenceParams {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashAttentionMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl Default for FlashAttentionMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl FlashAttentionMode {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[cfg(feature = "llama-cpp-2")]
 mod imp {
     use super::*;
@@ -39,6 +71,10 @@ mod imp {
     use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::model::{AddBos, LlamaModel};
     use llama_cpp_2::sampling::LlamaSampler;
+    use llama_cpp_sys_2::{
+        llama_flash_attn_type, LLAMA_FLASH_ATTN_TYPE_AUTO, LLAMA_FLASH_ATTN_TYPE_DISABLED,
+        LLAMA_FLASH_ATTN_TYPE_ENABLED,
+    };
     use std::num::NonZeroU32;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,6 +86,7 @@ mod imp {
         pub api_port: u16,
         pub model_name: String,
         pub model_path: Option<String>,
+        pub flash_attention: FlashAttentionMode,
         pub abort_flag: Arc<AtomicBool>,
         pub model_loaded: Arc<Mutex<bool>>,
         pub backend: LlamaBackend,
@@ -213,6 +250,21 @@ mod imp {
             .unwrap_or(false)
     }
 
+    fn resolve_flash_attention_mode(configured: FlashAttentionMode) -> FlashAttentionMode {
+        std::env::var("LOCALTHINKING_FLASH_ATTN")
+            .ok()
+            .and_then(|value| FlashAttentionMode::from_str(&value))
+            .unwrap_or(configured)
+    }
+
+    fn flash_attention_policy(mode: FlashAttentionMode) -> llama_flash_attn_type {
+        match mode {
+            FlashAttentionMode::Auto => LLAMA_FLASH_ATTN_TYPE_AUTO,
+            FlashAttentionMode::On => LLAMA_FLASH_ATTN_TYPE_ENABLED,
+            FlashAttentionMode::Off => LLAMA_FLASH_ATTN_TYPE_DISABLED,
+        }
+    }
+
     fn clamp_thread_count(value: u32, limit: u32) -> i32 {
         value.max(1).min(limit.max(1)) as i32
     }
@@ -333,6 +385,7 @@ mod imp {
                 api_port: 8080,
                 model_name: String::new(),
                 model_path: None,
+                flash_attention: FlashAttentionMode::default(),
                 abort_flag: Arc::new(AtomicBool::new(false)),
                 model_loaded: Arc::new(Mutex::new(false)),
                 backend,
@@ -354,6 +407,14 @@ mod imp {
 
         pub fn get_ctx_size(&self) -> u32 {
             self.ctx_size
+        }
+
+        pub fn set_flash_attention(&mut self, mode: FlashAttentionMode) {
+            self.flash_attention = mode;
+        }
+
+        pub fn get_flash_attention(&self) -> FlashAttentionMode {
+            self.flash_attention
         }
 
         pub fn set_model_name(&mut self, n: String) {
@@ -394,6 +455,25 @@ mod imp {
 
         pub fn gpu_acceleration_enabled(&self) -> bool {
             gpu_acceleration_enabled()
+        }
+
+        pub fn count_prompt_tokens(&self, messages: &[Message]) -> anyhow::Result<usize> {
+            if !self.is_model_loaded() {
+                return Err(anyhow::anyhow!("模型未加载"));
+            }
+
+            let model_guard = self
+                .model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("模型锁获取失败: {}", e))?;
+            let model = model_guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("模型未初始化"))?;
+            let prompt = crate::chat::build_prompt(&self.fmt, messages);
+            let tokens = model
+                .str_to_token(&prompt, AddBos::Always)
+                .map_err(|e| anyhow::anyhow!("分词失败: {}", e))?;
+            Ok(tokens.len())
         }
 
         pub fn generate_stream_with_params<F>(
@@ -439,12 +519,14 @@ mod imp {
                 self.ctx_size.max(tokens.len().max(64) as u32),
                 gpu_acceleration_enabled(),
             );
+            let flash_attention = resolve_flash_attention_mode(self.flash_attention);
             eprintln!(
-                "[推理] 上下文调优: decode_threads={}, batch_threads={}, n_batch={}, n_ubatch={}, gpu={}",
+                "[推理] 上下文调优: decode_threads={}, batch_threads={}, n_batch={}, n_ubatch={}, flash_attn={}, gpu={}",
                 tuning.decode_threads,
                 tuning.batch_threads,
                 tuning.n_batch,
                 tuning.n_ubatch,
+                flash_attention.as_str(),
                 gpu_acceleration_enabled(),
             );
 
@@ -456,6 +538,7 @@ mod imp {
                 .with_n_ubatch(tuning.n_ubatch)
                 .with_offload_kqv(tuning.offload_kqv)
                 .with_op_offload(tuning.op_offload)
+                .with_flash_attention_policy(flash_attention_policy(flash_attention))
                 .with_no_perf(tuning.no_perf);
 
             let mut ctx = model
@@ -669,6 +752,7 @@ mod imp {
                 "logical_cores": num_cpus::get(),
                 "ctx_size": self.ctx_size,
                 "gpu_acceleration": gpu_acceleration_enabled(),
+                "flash_attention": self.flash_attention.as_str(),
                 "llama_version": "llama-cpp-2",
                 "native_backend_available": true,
             })
@@ -736,6 +820,7 @@ mod imp {
         pub api_port: u16,
         pub model_name: String,
         pub model_path: Option<String>,
+        pub flash_attention: FlashAttentionMode,
         pub abort_flag: Arc<AtomicBool>,
         pub model_loaded: Arc<Mutex<bool>>,
         kv_cache_enabled: bool,
@@ -757,6 +842,7 @@ mod imp {
                 api_port: 8080,
                 model_name: String::new(),
                 model_path: None,
+                flash_attention: FlashAttentionMode::default(),
                 abort_flag: Arc::new(AtomicBool::new(false)),
                 model_loaded: Arc::new(Mutex::new(false)),
                 kv_cache_enabled: true,
@@ -780,6 +866,14 @@ mod imp {
 
         pub fn get_ctx_size(&self) -> u32 {
             self.ctx_size
+        }
+
+        pub fn set_flash_attention(&mut self, mode: FlashAttentionMode) {
+            self.flash_attention = mode;
+        }
+
+        pub fn get_flash_attention(&self) -> FlashAttentionMode {
+            self.flash_attention
         }
 
         pub fn set_model_name(&mut self, n: String) {
@@ -820,6 +914,12 @@ mod imp {
 
         pub fn gpu_acceleration_enabled(&self) -> bool {
             false
+        }
+
+        pub fn count_prompt_tokens(&self, _messages: &[Message]) -> anyhow::Result<usize> {
+            Err(anyhow::anyhow!(
+                "当前构建未启用原生 llama 后端。请使用 `cargo build --no-default-features --features llama-cpp-2` 重新构建，并确保系统已安装 cmake。"
+            ))
         }
 
         pub fn generate_stream_with_params<F>(
@@ -882,6 +982,7 @@ mod imp {
                 "logical_cores": num_cpus::get(),
                 "ctx_size": self.ctx_size,
                 "gpu_acceleration": false,
+                "flash_attention": self.flash_attention.as_str(),
                 "llama_version": "disabled",
                 "native_backend_available": false,
                 "native_backend_feature": "llama-cpp-2",

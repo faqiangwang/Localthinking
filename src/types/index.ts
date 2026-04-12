@@ -14,6 +14,7 @@ export interface ModelParams {
 export interface AppSettings {
   model_params: ModelParams;
   system_prompt: string;
+  flash_attention: 'auto' | 'on' | 'off';
   api_enabled: boolean;
   api_port: number;
 }
@@ -53,6 +54,7 @@ export interface SystemInfo {
   logical_cores: number;
   ctx_size: number;
   gpu_acceleration: boolean;
+  flash_attention: 'auto' | 'on' | 'off';
 }
 
 // ============ 聊天消息 ============
@@ -67,12 +69,18 @@ export interface ChatTokenEvent {
   content: string;
   n_tokens: number;
   tok_per_sec: number;
+  prompt_tokens: number;
+  prompt_tok_per_sec: number;
+  first_token_latency_ms: number;
 }
 
 export interface ChatDoneEvent {
   request_id: string;
   n_tokens: number;
   tok_per_sec: number;
+  prompt_tokens: number;
+  prompt_tok_per_sec: number;
+  first_token_latency_ms: number;
 }
 
 export interface ChatErrorEvent {
@@ -80,6 +88,9 @@ export interface ChatErrorEvent {
   error: string;
   n_tokens: number;
   tok_per_sec: number;
+  prompt_tokens: number;
+  prompt_tok_per_sec: number;
+  first_token_latency_ms: number;
 }
 
 // ============ 下载进度 ============
@@ -187,6 +198,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是一个本地 AI 助手。请直接�
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   model_params: DEFAULT_MODEL_PARAMS,
   system_prompt: DEFAULT_SYSTEM_PROMPT,
+  flash_attention: 'auto',
   api_enabled: true,
   api_port: 8080,
 };
@@ -243,6 +255,13 @@ export function isValidAppSettings(obj: unknown): obj is AppSettings {
 
   // 验证基本字段
   if (typeof s.system_prompt !== 'string') return false;
+  if (
+    s.flash_attention !== 'auto' &&
+    s.flash_attention !== 'on' &&
+    s.flash_attention !== 'off'
+  ) {
+    return false;
+  }
   if (typeof s.api_enabled !== 'boolean') return false;
   if (typeof s.api_port !== 'number') return false;
 
@@ -293,10 +312,17 @@ export function normalizeAppSettings(obj: unknown): AppSettings {
     source.system_prompt.trim() !== LEGACY_REASONING_SYSTEM_PROMPT.trim()
       ? source.system_prompt
       : defaults.system_prompt;
+  const normalizedFlashAttention =
+    source.flash_attention === 'on' ||
+    source.flash_attention === 'off' ||
+    source.flash_attention === 'auto'
+      ? source.flash_attention
+      : defaults.flash_attention;
 
   return {
     model_params: normalizeModelParams(source.model_params),
     system_prompt: normalizedSystemPrompt,
+    flash_attention: normalizedFlashAttention,
     api_enabled:
       typeof source.api_enabled === 'boolean' ? source.api_enabled : defaults.api_enabled,
     api_port: typeof source.api_port === 'number' ? source.api_port : defaults.api_port,

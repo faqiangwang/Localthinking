@@ -17,6 +17,9 @@ interface ChatStore extends PersistedChatState {
   streaming: boolean;
   error: string | null;
   tokPerSec: number;
+  promptTokPerSec: number;
+  firstTokenLatencyMs: number;
+  promptTokenCount: number;
   tokenCount: number;
   activeRequestId: string | null;
   draftAssistantMessage: Message | null;
@@ -40,6 +43,9 @@ interface ChatStore extends PersistedChatState {
   clearRuntimeState: () => void;
   setError: (error: string | null) => void;
   setTokPerSec: (speed: number) => void;
+  setPromptTokPerSec: (speed: number) => void;
+  setFirstTokenLatencyMs: (latencyMs: number) => void;
+  setPromptTokenCount: (count: number) => void;
   setTokenCount: (count: number) => void;
 }
 
@@ -150,6 +156,9 @@ export const useChatStore = create<ChatStore>()(
       streaming: false,
       error: null,
       tokPerSec: 0,
+      promptTokPerSec: 0,
+      firstTokenLatencyMs: 0,
+      promptTokenCount: 0,
       tokenCount: 0,
       activeRequestId: null,
       draftAssistantMessage: null,
@@ -183,6 +192,9 @@ export const useChatStore = create<ChatStore>()(
           activeRequestId: null,
           streaming: false,
           tokPerSec: 0,
+          promptTokPerSec: 0,
+          firstTokenLatencyMs: 0,
+          promptTokenCount: 0,
           tokenCount: 0,
         }));
 
@@ -206,6 +218,9 @@ export const useChatStore = create<ChatStore>()(
           streaming: false,
           error: null,
           tokPerSec: 0,
+          promptTokPerSec: 0,
+          firstTokenLatencyMs: 0,
+          promptTokenCount: 0,
           tokenCount: 0,
         }),
 
@@ -228,6 +243,9 @@ export const useChatStore = create<ChatStore>()(
             draftSessionId: deletingDraftSession ? null : state.draftSessionId,
             activeRequestId: deletingDraftSession ? null : state.activeRequestId,
             tokPerSec: 0,
+            promptTokPerSec: 0,
+            firstTokenLatencyMs: 0,
+            promptTokenCount: 0,
             tokenCount: 0,
             error: null,
           };
@@ -249,6 +267,9 @@ export const useChatStore = create<ChatStore>()(
           streaming: false,
           error: null,
           tokPerSec: 0,
+          promptTokPerSec: 0,
+          firstTokenLatencyMs: 0,
+          promptTokenCount: 0,
           tokenCount: 0,
           activeRequestId: null,
           draftAssistantMessage: null,
@@ -338,6 +359,9 @@ export const useChatStore = create<ChatStore>()(
             activeRequestId: clearingDraft ? null : state.activeRequestId,
             streaming: clearingDraft ? false : state.streaming,
             tokPerSec: 0,
+            promptTokPerSec: 0,
+            firstTokenLatencyMs: 0,
+            promptTokenCount: 0,
             tokenCount: 0,
             error: null,
           };
@@ -348,6 +372,9 @@ export const useChatStore = create<ChatStore>()(
           streaming: true,
           error: null,
           tokPerSec: 0,
+          promptTokPerSec: 0,
+          firstTokenLatencyMs: 0,
+          promptTokenCount: 0,
           tokenCount: 0,
           activeRequestId: requestId,
           draftAssistantMessage: null,
@@ -392,6 +419,9 @@ export const useChatStore = create<ChatStore>()(
             draftAssistantMessage: null,
             draftSessionId: null,
             tokPerSec: 0,
+            promptTokPerSec: 0,
+            firstTokenLatencyMs: 0,
+            promptTokenCount: 0,
             tokenCount: 0,
           };
         }),
@@ -420,6 +450,9 @@ export const useChatStore = create<ChatStore>()(
             draftAssistantMessage: null,
             draftSessionId: null,
             tokPerSec: 0,
+            promptTokPerSec: 0,
+            firstTokenLatencyMs: 0,
+            promptTokenCount: 0,
             tokenCount: 0,
           };
         }),
@@ -429,6 +462,9 @@ export const useChatStore = create<ChatStore>()(
           streaming: false,
           error: null,
           tokPerSec: 0,
+          promptTokPerSec: 0,
+          firstTokenLatencyMs: 0,
+          promptTokenCount: 0,
           tokenCount: 0,
           activeRequestId: null,
           draftAssistantMessage: null,
@@ -437,6 +473,9 @@ export const useChatStore = create<ChatStore>()(
 
       setError: error => set({ error }),
       setTokPerSec: tokPerSec => set({ tokPerSec }),
+      setPromptTokPerSec: promptTokPerSec => set({ promptTokPerSec }),
+      setFirstTokenLatencyMs: firstTokenLatencyMs => set({ firstTokenLatencyMs }),
+      setPromptTokenCount: promptTokenCount => set({ promptTokenCount }),
       setTokenCount: tokenCount => set({ tokenCount }),
     }),
     {

@@ -2,7 +2,7 @@
 use crate::api::ApiServerManager;
 use crate::backend::{InferenceBackend, Message};
 use crate::cache::{build_generation_cache_params_key, InferenceCache};
-use crate::engine::{InferenceParams, LlamaCppEngine};
+use crate::engine::{FlashAttentionMode, InferenceParams, LlamaCppEngine};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,9 @@ struct ChatTokenEvent {
     content: String,
     n_tokens: usize,
     tok_per_sec: f64,
+    prompt_tokens: usize,
+    prompt_tok_per_sec: f64,
+    first_token_latency_ms: f64,
 }
 
 #[derive(serde::Serialize)]
@@ -34,6 +37,9 @@ struct ChatDoneEvent {
     request_id: String,
     n_tokens: usize,
     tok_per_sec: f64,
+    prompt_tokens: usize,
+    prompt_tok_per_sec: f64,
+    first_token_latency_ms: f64,
 }
 
 #[derive(serde::Serialize)]
@@ -42,6 +48,9 @@ struct ChatErrorEvent {
     error: String,
     n_tokens: usize,
     tok_per_sec: f64,
+    prompt_tokens: usize,
+    prompt_tok_per_sec: f64,
+    first_token_latency_ms: f64,
 }
 
 fn calculate_tok_per_sec(started_at: Instant, n_tokens: usize) -> f64 {
@@ -165,7 +174,7 @@ pub async fn chat_stream(
     eprintln!("[INFO] chat_stream 开始，收到 {} 条消息", messages.len());
 
     // 检查模型是否已加载
-    let (loaded, fmt, model_identity) = {
+    let (loaded, fmt, model_identity, prompt_tokens) = {
         let engine = state.lock().unwrap_or_else(|p| p.into_inner());
         (
             engine.is_model_loaded(),
@@ -174,6 +183,7 @@ pub async fn chat_stream(
                 .model_path
                 .clone()
                 .unwrap_or_else(|| engine.model_name.clone()),
+            engine.count_prompt_tokens(&messages).unwrap_or(0),
         )
     };
 
@@ -186,6 +196,9 @@ pub async fn chat_stream(
                 error: msg.clone(),
                 n_tokens: 0,
                 tok_per_sec: 0.0,
+                prompt_tokens: 0,
+                prompt_tok_per_sec: 0.0,
+                first_token_latency_ms: 0.0,
             },
         );
         return Err(msg);
@@ -211,6 +224,9 @@ pub async fn chat_stream(
                     content: cached.content,
                     n_tokens: cached.token_count,
                     tok_per_sec: 0.0,
+                    prompt_tokens,
+                    prompt_tok_per_sec: 0.0,
+                    first_token_latency_ms: 0.0,
                 },
             );
         }
@@ -221,6 +237,9 @@ pub async fn chat_stream(
                 request_id,
                 n_tokens: cached.token_count,
                 tok_per_sec: 0.0,
+                prompt_tokens,
+                prompt_tok_per_sec: 0.0,
+                first_token_latency_ms: 0.0,
             },
         );
         return Ok(());
@@ -238,6 +257,8 @@ pub async fn chat_stream(
     let mut token_count = 0;
     let mut content = String::new();
     let mut decode_started_at: Option<Instant> = None;
+    let mut first_token_latency_ms = 0.0;
+    let mut prompt_tok_per_sec = 0.0;
 
     while let Some(token) = rx.recv().await {
         if token.is_empty() {
@@ -245,7 +266,10 @@ pub async fn chat_stream(
         }
 
         if decode_started_at.is_none() {
-            decode_started_at = Some(Instant::now());
+            let first_decode_at = Instant::now();
+            first_token_latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            prompt_tok_per_sec = calculate_tok_per_sec(started_at, prompt_tokens);
+            decode_started_at = Some(first_decode_at);
         }
 
         token_count += 1;
@@ -258,6 +282,9 @@ pub async fn chat_stream(
                 content: token,
                 n_tokens: token_count,
                 tok_per_sec: calculate_tok_per_sec(throughput_started_at, token_count),
+                prompt_tokens,
+                prompt_tok_per_sec,
+                first_token_latency_ms,
             },
         );
     }
@@ -276,6 +303,9 @@ pub async fn chat_stream(
                         decode_started_at.unwrap_or(started_at),
                         token_count,
                     ),
+                    prompt_tokens,
+                    prompt_tok_per_sec,
+                    first_token_latency_ms,
                 },
             );
             eprintln!("[INFO] chat_stream 完成，共发送 {} tokens", token_count);
@@ -293,6 +323,9 @@ pub async fn chat_stream(
                         decode_started_at.unwrap_or(started_at),
                         token_count,
                     ),
+                    prompt_tokens,
+                    prompt_tok_per_sec,
+                    first_token_latency_ms,
                 },
             );
             Err(message)
@@ -309,6 +342,9 @@ pub async fn chat_stream(
                         decode_started_at.unwrap_or(started_at),
                         token_count,
                     ),
+                    prompt_tokens,
+                    prompt_tok_per_sec,
+                    first_token_latency_ms,
                 },
             );
             Err(message)
@@ -335,6 +371,21 @@ pub fn set_context_size(size: u32, state: State<'_, EngineState>) -> Result<(), 
         poisoned.into_inner()
     });
     engine.set_ctx_size(size);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_flash_attention_policy(
+    mode: String,
+    state: State<'_, EngineState>,
+) -> Result<(), String> {
+    let mut engine = state.lock().unwrap_or_else(|poisoned| {
+        eprintln!("[WARN] set_flash_attention_policy: 检测到 poisoned lock，正在恢复...");
+        poisoned.into_inner()
+    });
+    let mode = FlashAttentionMode::from_str(&mode)
+        .ok_or_else(|| "flash_attention 必须为 auto/on/off".to_string())?;
+    engine.set_flash_attention(mode);
     Ok(())
 }
 
@@ -625,6 +676,7 @@ pub fn get_performance_stats(
     let ctx_size = engine.get_ctx_size();
     let gpu_layers = engine.get_gpu_layers();
     let gpu_enabled = engine.gpu_acceleration_enabled();
+    let flash_attention = engine.get_flash_attention().as_str();
     let cache_stats = cache.stats();
 
     serde_json::json!({
@@ -632,6 +684,7 @@ pub fn get_performance_stats(
         "context_size": ctx_size,
         "gpu_layers": gpu_layers,
         "gpu_enabled": gpu_enabled,
+        "flash_attention": flash_attention,
         "estimated_memory_mb": estimate_memory_usage(ctx_size, gpu_enabled),
         "cache": cache_stats,
     })
@@ -672,6 +725,7 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
     let ctx_size = engine.get_ctx_size();
     let gpu_layers = engine.get_gpu_layers();
     let gpu_enabled = engine.gpu_acceleration_enabled();
+    let flash_attention = engine.get_flash_attention();
 
     let mut suggestions = Vec::new();
 
@@ -699,6 +753,13 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
         );
     }
 
+    if gpu_enabled && flash_attention == FlashAttentionMode::Off {
+        suggestions.push(
+            "提示：GPU/Metal 已启用，但 Flash Attention 当前关闭，prefill 速度可能受限。"
+                .to_string(),
+        );
+    }
+
     serde_json::json!({
         "suggestions": suggestions,
         "current_config": {
@@ -706,6 +767,7 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
             "context_size": ctx_size,
             "gpu_layers": gpu_layers,
             "gpu_enabled": gpu_enabled,
+            "flash_attention": flash_attention.as_str(),
             "physical_cores": physical_cores
         }
     })

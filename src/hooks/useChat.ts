@@ -38,6 +38,9 @@ export function useChat(
     streaming,
     error,
     tokPerSec,
+    promptTokPerSec,
+    firstTokenLatencyMs,
+    promptTokenCount,
     tokenCount,
     draftAssistantMessage,
     draftSessionId,
@@ -56,6 +59,9 @@ export function useChat(
     finishStreaming,
     failStreaming,
     setTokPerSec,
+    setPromptTokPerSec,
+    setFirstTokenLatencyMs,
+    setPromptTokenCount,
     setTokenCount,
   } = useChatStore();
 
@@ -151,6 +157,9 @@ export function useChat(
       const currentContent = requestBuffersRef.current.get(payload.request_id) || '';
       requestBuffersRef.current.set(payload.request_id, currentContent + text);
       setTokPerSec(payload.tok_per_sec || 0);
+      setPromptTokPerSec(payload.prompt_tok_per_sec || 0);
+      setFirstTokenLatencyMs(payload.first_token_latency_ms || 0);
+      setPromptTokenCount(payload.prompt_tokens || 0);
       setTokenCount(payload.n_tokens || 0);
       scheduleStreamingUpdate(payload.request_id);
     });
@@ -163,6 +172,9 @@ export function useChat(
 
       flushRequestContent(payload.request_id);
       setTokPerSec(payload.tok_per_sec || 0);
+      setPromptTokPerSec(payload.prompt_tok_per_sec || 0);
+      setFirstTokenLatencyMs(payload.first_token_latency_ms || 0);
+      setPromptTokenCount(payload.prompt_tokens || 0);
       setTokenCount(payload.n_tokens || 0);
       finishStreaming(payload.request_id);
       clearRequestTracking(payload.request_id);
@@ -176,6 +188,9 @@ export function useChat(
 
       flushRequestContent(payload.request_id);
       setTokPerSec(payload.tok_per_sec || 0);
+      setPromptTokPerSec(payload.prompt_tok_per_sec || 0);
+      setFirstTokenLatencyMs(payload.first_token_latency_ms || 0);
+      setPromptTokenCount(payload.prompt_tokens || 0);
       setTokenCount(payload.n_tokens || 0);
       failStreaming(payload.request_id, payload.error);
       clearRequestTracking(payload.request_id);
@@ -200,6 +215,9 @@ export function useChat(
     flushRequestContent,
     scheduleStreamingUpdate,
     setTokPerSec,
+    setPromptTokPerSec,
+    setFirstTokenLatencyMs,
+    setPromptTokenCount,
     setTokenCount,
   ]);
 
@@ -290,6 +308,9 @@ export function useChat(
     streaming,
     error,
     tokPerSec,
+    promptTokPerSec,
+    firstTokenLatencyMs,
+    promptTokenCount,
     tokenCount,
     send,
     stop,

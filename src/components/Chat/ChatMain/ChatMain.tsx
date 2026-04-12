@@ -21,6 +21,9 @@ interface ChatMainProps {
   modelError: string | null;
   modelParams: ModelParams;
   tokPerSec: number;
+  promptTokPerSec: number;
+  firstTokenLatencyMs: number;
+  promptTokenCount: number;
   tokenCount: number;
   onNewSession: () => void;
   onSend: (content: string) => void;
@@ -42,6 +45,9 @@ export function ChatMain({
   modelError,
   modelParams,
   tokPerSec,
+  promptTokPerSec,
+  firstTokenLatencyMs,
+  promptTokenCount,
   tokenCount,
   onNewSession,
   onSend,
@@ -151,6 +157,9 @@ export function ChatMain({
       <StatusBar
         streaming={streaming}
         tokPerSec={tokPerSec}
+        promptTokPerSec={promptTokPerSec}
+        firstTokenLatencyMs={firstTokenLatencyMs}
+        promptTokenCount={promptTokenCount}
         tokenCount={tokenCount}
         onStop={onStop}
       />

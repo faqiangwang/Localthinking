@@ -20,6 +20,7 @@ interface PerformanceStats {
   context_size: number;
   gpu_layers: number;
   gpu_enabled: boolean;
+  flash_attention: 'auto' | 'on' | 'off';
   estimated_memory_mb: number;
   cache: CacheStats;
 }
@@ -33,6 +34,9 @@ interface DebugPanelProps {
   streaming: boolean;
   messages: Message[];
   tokPerSec: number;
+  promptTokPerSec: number;
+  firstTokenLatencyMs: number;
+  promptTokenCount: number;
   tokenCount: number;
   modelError: string | null;
   chatError: string | null;
@@ -48,6 +52,9 @@ export function DebugPanel({
   streaming,
   messages,
   tokPerSec,
+  promptTokPerSec,
+  firstTokenLatencyMs,
+  promptTokenCount,
   tokenCount,
   modelError,
   chatError,
@@ -104,7 +111,16 @@ export function DebugPanel({
             消息数: <strong>{messages.length}</strong>
           </span>
           <span>
-            速度: <strong>{tokPerSec.toFixed(1)} tok/s</strong>
+            TG速度: <strong>{tokPerSec.toFixed(1)} tok/s</strong>
+          </span>
+          <span>
+            PP速度: <strong>{promptTokPerSec.toFixed(1)} tok/s</strong>
+          </span>
+          <span>
+            首Token: <strong>{firstTokenLatencyMs.toFixed(0)} ms</strong>
+          </span>
+          <span>
+            Prompt Tokens: <strong>{promptTokenCount}</strong>
           </span>
           <span>
             Token数: <strong>{tokenCount}</strong>
@@ -132,6 +148,9 @@ export function DebugPanel({
           </span>
           <span>
             Repeat: <strong>{modelParams.repeat_penalty.toFixed(2)}</strong>
+          </span>
+          <span>
+            Flash Attention: <strong>{stats?.flash_attention ?? '未知'}</strong>
           </span>
         </div>
       </div>
