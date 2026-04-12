@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   type ChatDoneEvent,
   type ChatErrorEvent,
+  type ChatStartEvent,
   type ModelParams,
   type ChatTokenEvent,
   type Message,
@@ -164,6 +165,18 @@ export function useChat(
       scheduleStreamingUpdate(payload.request_id);
     });
 
+    const unStart = listen<ChatStartEvent>('chat://start', event => {
+      const payload = event.payload;
+      if (payload.request_id !== currentRequestIdRef.current) {
+        return;
+      }
+
+      setPromptTokenCount(payload.prompt_tokens || 0);
+      setTokPerSec(0);
+      setPromptTokPerSec(0);
+      setFirstTokenLatencyMs(0);
+    });
+
     const unDone = listen<ChatDoneEvent>('chat://done', event => {
       const payload = event.payload;
       if (payload.request_id !== currentRequestIdRef.current) {
@@ -204,6 +217,7 @@ export function useChat(
       currentRequestIdRef.current = null;
 
       unToken.then(unsubscribe => unsubscribe()).catch(() => {});
+      unStart.then(unsubscribe => unsubscribe()).catch(() => {});
       unDone.then(unsubscribe => unsubscribe()).catch(() => {});
       unError.then(unsubscribe => unsubscribe()).catch(() => {});
     };

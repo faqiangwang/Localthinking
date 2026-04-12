@@ -74,6 +74,11 @@ export interface ChatTokenEvent {
   first_token_latency_ms: number;
 }
 
+export interface ChatStartEvent {
+  request_id: string;
+  prompt_tokens: number;
+}
+
 export interface ChatDoneEvent {
   request_id: string;
   n_tokens: number;

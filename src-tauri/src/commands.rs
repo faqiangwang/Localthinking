@@ -22,6 +22,12 @@ pub struct ChatGenerationParams {
 }
 
 #[derive(serde::Serialize)]
+struct ChatStartEvent {
+    request_id: String,
+    prompt_tokens: usize,
+}
+
+#[derive(serde::Serialize)]
 struct ChatTokenEvent {
     request_id: String,
     content: String,
@@ -214,6 +220,14 @@ pub async fn chat_stream(
     let prompt = crate::chat::build_prompt(&fmt, &messages);
     let cache_params =
         build_generation_cache_params_key(&model_identity, ctx_size, &inference_params);
+
+    let _ = window.emit(
+        "chat://start",
+        &ChatStartEvent {
+            request_id: request_id.clone(),
+            prompt_tokens,
+        },
+    );
 
     if let Some(cached) = cache.get(&prompt, &cache_params) {
         if !cached.content.is_empty() {

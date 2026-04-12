@@ -26,7 +26,13 @@ export function StatusBar({
 
   return (
     <div className={styles.statusBar}>
-      <span>{tokPerSec > 0 ? `TG ${tokPerSec.toFixed(1)} tok/s` : '思考中...'}</span>
+      <span>
+        {tokPerSec > 0
+          ? `TG ${tokPerSec.toFixed(1)} tok/s`
+          : promptTokenCount > 0
+            ? `PP处理中...`
+            : '思考中...'}
+      </span>
       {promptTokPerSec > 0 && <span>{`PP ${promptTokPerSec.toFixed(1)} tok/s`}</span>}
       {firstTokenLatencyMs > 0 && <span>{`首 token ${firstTokenLatencyMs.toFixed(0)} ms`}</span>}
       {promptTokenCount > 0 && <span>{`Prompt ${promptTokenCount} tokens`}</span>}
