@@ -169,6 +169,25 @@ function extractVisibleAssistantContent(content: string, streaming: boolean): st
   return normalized;
 }
 
+function sanitizeMessagesForInference(messages: Message[]): Message[] {
+  return messages.flatMap(message => {
+    if (message.role !== 'assistant') {
+      return [message];
+    }
+
+    const sanitizedContent = extractVisibleAssistantContent(message.content, false);
+    if (!sanitizedContent || sanitizedContent === '回复生成异常，请重试。') {
+      return [];
+    }
+
+    if (sanitizedContent === message.content) {
+      return [message];
+    }
+
+    return [{ ...message, content: sanitizedContent }];
+  });
+}
+
 function calculateRateFallback(nTokens: number, startedAt: number): number {
   const elapsedSeconds = (Date.now() - startedAt) / 1000;
   return elapsedSeconds > 0 ? nTokens / elapsedSeconds : 0;
@@ -419,7 +438,7 @@ export function useChat(
       const currentSession = useChatStore
         .getState()
         .sessions.find(session => session.id === sessionId);
-      const currentMessages = currentSession?.messages ?? [];
+      const currentMessages = sanitizeMessagesForInference(currentSession?.messages ?? []);
 
       try {
         await invoke('chat_stream', {

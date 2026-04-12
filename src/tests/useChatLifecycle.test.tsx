@@ -152,4 +152,44 @@ describe('useChat lifecycle', () => {
       expect(screen.getByTestId('messages')).not.toHaveTextContent('我需要分析用户的需求');
     });
   });
+
+  it('发送请求前会清理历史中的内部独白 assistant 消息', async () => {
+    useChatStore.setState({
+      sessions: [
+        {
+          id: 'session-1',
+          name: 'test',
+          messages: [
+            { id: 'sys', role: 'system', content: 'system prompt' },
+            { id: 'user-1', role: 'user', content: '你好' },
+            {
+              id: 'assistant-1',
+              role: 'assistant',
+              content:
+                '好的，现在我要处理用户的请求：“你好”。首先，我需要分析用户的需求。',
+            },
+          ],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+      activeSessionId: 'session-1',
+    });
+
+    render(<Harness />);
+    fireEvent.click(screen.getByText('send'));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        'chat_stream',
+        expect.objectContaining({
+          messages: [
+            { id: 'sys', role: 'system', content: 'system prompt' },
+            { id: 'user-1', role: 'user', content: '你好' },
+            expect.objectContaining({ role: 'user', content: 'hello' }),
+          ],
+        })
+      );
+    });
+  });
 });
