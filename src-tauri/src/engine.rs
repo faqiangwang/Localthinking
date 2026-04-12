@@ -58,6 +58,32 @@ mod imp {
     unsafe impl Send for LlamaCppEngine {}
     unsafe impl Sync for LlamaCppEngine {}
 
+    fn requires_cpu_moe_override(path: &str) -> bool {
+        let file_name = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path)
+            .to_lowercase();
+
+        file_name.contains("mixtral")
+            || file_name.contains("-moe")
+            || file_name.contains("_moe")
+            || file_name.contains(" moe ")
+            || file_name.contains("deepseek-v2")
+            || file_name.contains("deepseek-v3")
+            || (file_name.contains("deepseek-r1") && !file_name.contains("distill"))
+            || file_name
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|segment| {
+                    segment.starts_with('a')
+                        && segment.ends_with('b')
+                        && segment.len() > 2
+                        && segment[1..segment.len() - 1]
+                            .chars()
+                            .all(|character| character.is_ascii_digit())
+                })
+    }
+
     impl LlamaCppEngine {
         pub fn new() -> anyhow::Result<Self> {
             Self::with_config(2048, PromptFormat::ChatML)
@@ -284,9 +310,15 @@ mod imp {
                 return Err(anyhow::anyhow!("模型文件不存在: {}", path));
             }
 
-            let model_params = LlamaModelParams::default();
-            let model = LlamaModel::load_from_file(&self.backend, path, &model_params)
-                .map_err(|e| anyhow::anyhow!("模型加载失败: {}", e))?;
+            let mut model_params = Box::pin(LlamaModelParams::default());
+            if requires_cpu_moe_override(path) {
+                eprintln!("[模型] 检测到 MoE 模型，启用 CPU MoE 兼容模式");
+                model_params.as_mut().add_cpu_moe_override();
+            }
+
+            let model =
+                LlamaModel::load_from_file(&self.backend, path, model_params.as_ref().get_ref())
+                    .map_err(|e| anyhow::anyhow!("模型加载失败: {}", e))?;
 
             if let Ok(mut model_guard) = self.model.lock() {
                 *model_guard = Some(model);
