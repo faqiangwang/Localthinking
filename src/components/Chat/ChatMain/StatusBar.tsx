@@ -31,7 +31,7 @@ export function StatusBar({
           ? `TG ${tokPerSec.toFixed(1)} tok/s`
           : promptTokenCount > 0
             ? `PP处理中...`
-            : '思考中...'}
+            : '生成中...'}
       </span>
       {promptTokPerSec > 0 && <span>{`PP ${promptTokPerSec.toFixed(1)} tok/s`}</span>}
       {firstTokenLatencyMs > 0 && <span>{`首 token ${firstTokenLatencyMs.toFixed(0)} ms`}</span>}

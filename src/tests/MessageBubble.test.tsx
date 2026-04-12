@@ -52,4 +52,35 @@ describe('MessageBubble reasoning fallback', () => {
     expect(screen.queryByText('先判断用户意图。')).not.toBeInTheDocument();
     expect(screen.getByText('你好，我可以帮你处理问题。')).toBeInTheDocument();
   });
+
+  it('隐藏裸思维链式内部独白', () => {
+    render(
+      <MessageBubble
+        message={{
+          role: 'assistant',
+          content:
+            '好，用户又发来了“你可以做什么”，这可能意味着他们还不太清楚我的能力。我需要确保回答全面，同时保持友好和有帮助的态度。',
+        }}
+      />
+    );
+
+    expect(screen.queryByText(/用户又发来了/)).not.toBeInTheDocument();
+    expect(screen.getByText('回复生成异常，请重试。')).toBeInTheDocument();
+  });
+
+  it('流式阶段不显示裸思维链内部独白', () => {
+    render(
+      <MessageBubble
+        message={{
+          role: 'assistant',
+          content:
+            '嗯，用户又发来了“你可以做什么”，这可能意味着他们对我的能力还不太清楚。',
+        }}
+        streaming
+      />
+    );
+
+    expect(screen.queryByText(/用户又发来了/)).not.toBeInTheDocument();
+    expect(screen.queryByText('回复生成异常，请重试。')).not.toBeInTheDocument();
+  });
 });

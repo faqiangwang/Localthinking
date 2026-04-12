@@ -38,6 +38,32 @@ const THINKING_BLOCK_PATTERNS = [
   },
 ];
 
+const RAW_REASONING_USER_CUES = [
+  '用户',
+  '对话历史',
+  '回应',
+  '回答',
+  '具体服务',
+  '能力',
+  '服务',
+];
+
+const RAW_REASONING_PLANNING_CUES = [
+  '我需要',
+  '我应该',
+  '我要',
+  '我会',
+  '看起来',
+  '意味着',
+  '确保回应',
+  '保持友好',
+  '开放的态度',
+  '回顾之前的对话历史',
+  '进一步了解',
+];
+
+const RAW_REASONING_OPENING = /^(好|嗯|好的|首先|另外|看起来|让我|基于|根据)[，,。]?\s*/;
+
 function trimOrNull(value: string | null | undefined) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -68,6 +94,57 @@ function resolveThinkingPattern(content: string) {
     ) ||
     null
   );
+}
+
+function isLikelyRawReasoningLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (
+    RAW_REASONING_OPENING.test(trimmed) &&
+    (RAW_REASONING_USER_CUES.some(cue => trimmed.includes(cue)) ||
+      RAW_REASONING_PLANNING_CUES.some(cue => trimmed.includes(cue)))
+  ) {
+    return true;
+  }
+
+  const userCueCount = RAW_REASONING_USER_CUES.filter(cue => trimmed.includes(cue)).length;
+  const planningCueCount = RAW_REASONING_PLANNING_CUES.filter(cue => trimmed.includes(cue)).length;
+
+  return (
+    (trimmed.includes('用户') && planningCueCount > 0) ||
+    userCueCount + planningCueCount >= 2
+  );
+}
+
+function sanitizeRawReasoningContent(content: string, streaming: boolean) {
+  const normalized = content.replace(/\r/g, '').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const paragraphs = normalized
+    .split(/\n{2,}/)
+    .map(paragraph => paragraph.trim())
+    .filter(Boolean);
+
+  if (paragraphs.length === 0) {
+    return null;
+  }
+
+  const visibleParagraphs = paragraphs.filter(paragraph => !isLikelyRawReasoningLine(paragraph));
+
+  if (visibleParagraphs.length === paragraphs.length) {
+    return null;
+  }
+
+  if (visibleParagraphs.length > 0) {
+    return visibleParagraphs.join('\n\n');
+  }
+
+  return streaming ? '' : '回复生成异常，请重试。';
 }
 
 // 解析思考过程和回答
@@ -112,6 +189,11 @@ function parseContent(content: string, hasPartialThinking: boolean, hasPartialAn
         answer: fallbackAnswerFromThinkingOnlyContent(content, thinking),
       };
     }
+  } else {
+    const sanitized = sanitizeRawReasoningContent(content, false);
+    if (sanitized !== null) {
+      answer = sanitized;
+    }
   }
 
   return { thinking, answer };
@@ -128,6 +210,7 @@ function arePropsEqual(prevProps: MessageBubbleProps, nextProps: MessageBubblePr
 
 export const MessageBubble = memo(function MessageBubble({ message, streaming }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const hasExplicitThinkingPattern = resolveThinkingPattern(message.content) !== null;
 
   // 检测流式输出中是否正在生成 thinking
   const lowerContent = message.content.toLowerCase();
@@ -154,7 +237,12 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
   const { thinking, answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);
   const shouldFallbackThinkingOnlyAnswer =
     !isUser && !answer && (thinking || hasPartialThinking);
-  const displayAnswer = shouldFallbackThinkingOnlyAnswer
+  const rawReasoningFallback = !isUser && !hasExplicitThinkingPattern
+    ? sanitizeRawReasoningContent(message.content, Boolean(streaming))
+    : null;
+  const displayAnswer = rawReasoningFallback !== null
+    ? rawReasoningFallback
+    : shouldFallbackThinkingOnlyAnswer
     ? fallbackAnswerFromThinkingOnlyContent(message.content, thinking)
     : answer;
 
