@@ -270,10 +270,63 @@ mod imp {
         value.max(1).min(limit.max(1)) as i32
     }
 
-    pub(crate) fn resolve_context_tuning(
+    fn detect_available_ram_gb() -> Option<f32> {
+        let available_ram_gb = crate::sysinfo::detect_hardware().available_ram_gb;
+        if available_ram_gb.is_finite() && available_ram_gb > 0.0 {
+            Some(available_ram_gb)
+        } else {
+            None
+        }
+    }
+
+    fn resolve_batch_caps(available_ram_gb: Option<f32>, gpu_enabled: bool) -> Option<(u32, u32)> {
+        let available_ram_gb = available_ram_gb?;
+
+        if available_ram_gb <= 4.0 {
+            Some(if gpu_enabled { (256, 128) } else { (128, 64) })
+        } else if available_ram_gb <= 8.0 {
+            Some(if gpu_enabled { (512, 256) } else { (256, 128) })
+        } else if available_ram_gb <= 12.0 {
+            Some(if gpu_enabled { (768, 384) } else { (384, 192) })
+        } else {
+            None
+        }
+    }
+
+    fn resolve_ctx_cap(available_ram_gb: Option<f32>, gpu_enabled: bool) -> Option<u32> {
+        let available_ram_gb = available_ram_gb?;
+
+        if available_ram_gb <= 4.0 {
+            Some(if gpu_enabled { 1024 } else { 1024 })
+        } else if available_ram_gb <= 8.0 {
+            Some(if gpu_enabled { 2048 } else { 1536 })
+        } else if available_ram_gb <= 12.0 {
+            Some(if gpu_enabled { 3072 } else { 2048 })
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn resolve_effective_ctx_size_with_memory(
+        requested_ctx_size: u32,
+        prompt_tokens: usize,
+        gpu_enabled: bool,
+        available_ram_gb: Option<f32>,
+    ) -> u32 {
+        let minimum_ctx_size = (prompt_tokens.max(64)) as u32;
+        let requested_ctx_size = requested_ctx_size.max(minimum_ctx_size);
+
+        match resolve_ctx_cap(available_ram_gb, gpu_enabled) {
+            Some(cap) => requested_ctx_size.min(cap.max(minimum_ctx_size)),
+            None => requested_ctx_size,
+        }
+    }
+
+    pub(crate) fn resolve_context_tuning_with_memory(
         requested_threads: u32,
         ctx_size: u32,
         gpu_enabled: bool,
+        available_ram_gb: Option<f32>,
     ) -> ContextTuningProfile {
         let physical = num_cpus::get_physical().max(1) as u32;
         let logical = num_cpus::get().max(1) as u32;
@@ -311,6 +364,19 @@ mod imp {
         }
         .max(64);
 
+        let (n_batch_cap, n_ubatch_cap) =
+            resolve_batch_caps(available_ram_gb, gpu_enabled).unwrap_or((ctx_size, default_n_batch));
+        let resolved_n_batch = parse_env_u32("LOCALTHINKING_N_BATCH")
+            .unwrap_or(default_n_batch)
+            .max(64)
+            .min(ctx_size)
+            .min(n_batch_cap.max(64));
+        let resolved_n_ubatch = parse_env_u32("LOCALTHINKING_N_UBATCH")
+            .unwrap_or(default_n_ubatch)
+            .max(64)
+            .min(resolved_n_batch)
+            .min(n_ubatch_cap.max(64));
+
         ContextTuningProfile {
             decode_threads: clamp_thread_count(
                 parse_env_u32("LOCALTHINKING_DECODE_THREADS").unwrap_or(default_decode_threads),
@@ -320,19 +386,25 @@ mod imp {
                 parse_env_u32("LOCALTHINKING_BATCH_THREADS").unwrap_or(default_batch_threads),
                 logical,
             ),
-            n_batch: parse_env_u32("LOCALTHINKING_N_BATCH")
-                .unwrap_or(default_n_batch)
-                .max(64)
-                .min(ctx_size),
-            n_ubatch: parse_env_u32("LOCALTHINKING_N_UBATCH")
-                .unwrap_or(default_n_ubatch)
-                .max(64)
-                .min(default_n_batch)
-                .min(ctx_size),
+            n_batch: resolved_n_batch,
+            n_ubatch: resolved_n_ubatch,
             offload_kqv: gpu_enabled,
             op_offload: gpu_enabled,
             no_perf: true,
         }
+    }
+
+    pub(crate) fn resolve_context_tuning(
+        requested_threads: u32,
+        ctx_size: u32,
+        gpu_enabled: bool,
+    ) -> ContextTuningProfile {
+        resolve_context_tuning_with_memory(
+            requested_threads,
+            ctx_size,
+            gpu_enabled,
+            detect_available_ram_gb(),
+        )
     }
 
     fn log_moe_compatibility(decision: &MoeCompatibilityDecision, source: &str) {
@@ -408,6 +480,29 @@ mod imp {
 
         pub fn get_ctx_size(&self) -> u32 {
             self.ctx_size
+        }
+
+        pub fn resolve_runtime_ctx_size(&self, requested_ctx_size: u32, prompt_tokens: usize) -> u32 {
+            let gpu_enabled = gpu_acceleration_enabled();
+            let available_ram_gb = detect_available_ram_gb();
+            let effective_ctx_size = resolve_effective_ctx_size_with_memory(
+                requested_ctx_size,
+                prompt_tokens,
+                gpu_enabled,
+                available_ram_gb,
+            );
+
+            if effective_ctx_size < requested_ctx_size {
+                eprintln!(
+                    "[调优] 内存感知策略生效: available_ram_gb={:?}, requested_ctx={}, effective_ctx={}, prompt_tokens={}",
+                    available_ram_gb,
+                    requested_ctx_size,
+                    effective_ctx_size,
+                    prompt_tokens
+                );
+            }
+
+            effective_ctx_size
         }
 
         pub fn set_flash_attention(&mut self, mode: FlashAttentionMode) {
@@ -583,14 +678,13 @@ mod imp {
             }
 
             eprintln!("[推理] 提示词长度: {} tokens", tokens.len());
-            let tuning = resolve_context_tuning(
-                self.n_threads,
-                self.ctx_size.max(tokens.len().max(64) as u32),
-                gpu_acceleration_enabled(),
-            );
+            let runtime_ctx_size =
+                self.resolve_runtime_ctx_size(self.ctx_size.max(tokens.len().max(64) as u32), tokens.len());
+            let tuning = resolve_context_tuning(self.n_threads, runtime_ctx_size, gpu_acceleration_enabled());
             let flash_attention = resolve_flash_attention_mode(self.flash_attention);
             eprintln!(
-                "[推理] 上下文调优: decode_threads={}, batch_threads={}, n_batch={}, n_ubatch={}, flash_attn={}, gpu={}",
+                "[推理] 上下文调优: ctx={}, decode_threads={}, batch_threads={}, n_batch={}, n_ubatch={}, flash_attn={}, gpu={}",
+                runtime_ctx_size,
                 tuning.decode_threads,
                 tuning.batch_threads,
                 tuning.n_batch,
@@ -600,7 +694,7 @@ mod imp {
             );
 
             let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(NonZeroU32::new(self.ctx_size))
+                .with_n_ctx(NonZeroU32::new(runtime_ctx_size))
                 .with_n_threads(tuning.decode_threads)
                 .with_n_threads_batch(tuning.batch_threads)
                 .with_n_batch(tuning.n_batch)
@@ -1069,11 +1163,13 @@ pub use imp::LlamaCppEngine;
 
 #[cfg(all(test, feature = "llama-cpp-2"))]
 mod tuning_tests {
-    use super::imp::resolve_context_tuning;
+    use super::imp::{
+        resolve_context_tuning_with_memory, resolve_effective_ctx_size_with_memory,
+    };
 
     #[test]
     fn resolve_context_tuning_prefers_smaller_decode_pool_on_gpu() {
-        let tuning = resolve_context_tuning(8, 4096, true);
+        let tuning = resolve_context_tuning_with_memory(8, 4096, true, None);
 
         assert_eq!(tuning.decode_threads, 6);
         assert_eq!(tuning.batch_threads, 8);
@@ -1086,7 +1182,7 @@ mod tuning_tests {
 
     #[test]
     fn resolve_context_tuning_uses_requested_threads_on_cpu() {
-        let tuning = resolve_context_tuning(6, 2048, false);
+        let tuning = resolve_context_tuning_with_memory(6, 2048, false, None);
 
         assert_eq!(tuning.decode_threads, 6);
         assert_eq!(tuning.batch_threads, 6);
@@ -1095,6 +1191,21 @@ mod tuning_tests {
         assert!(!tuning.op_offload);
         assert!(!tuning.offload_kqv);
         assert!(tuning.no_perf);
+    }
+
+    #[test]
+    fn resolve_context_tuning_shrinks_batches_under_memory_pressure() {
+        let tuning = resolve_context_tuning_with_memory(8, 4096, true, Some(3.5));
+
+        assert_eq!(tuning.n_batch, 256);
+        assert_eq!(tuning.n_ubatch, 128);
+    }
+
+    #[test]
+    fn resolve_effective_ctx_size_caps_to_available_memory_budget() {
+        let effective_ctx = resolve_effective_ctx_size_with_memory(4096, 256, true, Some(3.5));
+
+        assert_eq!(effective_ctx, 1024);
     }
 }
 

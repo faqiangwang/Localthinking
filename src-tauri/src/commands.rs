@@ -216,9 +216,13 @@ pub async fn chat_stream(
 
     let engine_for_task = state.inner().clone();
     let msgs = messages.clone();
-    let (inference_params, ctx_size) = sanitize_chat_generation_params(params);
+    let (inference_params, requested_ctx_size) = sanitize_chat_generation_params(params);
+    let effective_ctx_size = {
+        let engine = state.lock().unwrap_or_else(|p| p.into_inner());
+        engine.resolve_runtime_ctx_size(requested_ctx_size, prompt_tokens)
+    };
     let cache_params =
-        build_generation_cache_params_key(&model_identity, ctx_size, &inference_params);
+        build_generation_cache_params_key(&model_identity, effective_ctx_size, &inference_params);
 
     let _ = window.emit(
         "chat://start",
@@ -260,7 +264,7 @@ pub async fn chat_stream(
 
     let handle = tokio::task::spawn_blocking(move || {
         let mut engine = engine_for_task.lock().unwrap_or_else(|p| p.into_inner());
-        engine.set_ctx_size(ctx_size);
+        engine.set_ctx_size(effective_ctx_size);
         engine.generate_stream_with_params(msgs, inference_params, move |token: String| {
             let _ = tx_clone.blocking_send(token);
         })
