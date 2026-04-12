@@ -8,65 +8,74 @@ interface MessageBubbleProps {
   streaming?: boolean;
 }
 
+const THINKING_BLOCK_PATTERNS = [
+  {
+    thinking: /<思考>([\s\S]*?)<\/思考>/,
+    answer: /<回答>([\s\S]*?)<\/回答>/,
+    partialThinking: /<思考>([\s\S]*)/,
+    partialAnswer: /<回答>([\s\S]*)/,
+    thinkingStart: '<思考>',
+    thinkingEnd: '</思考>',
+    answerMarkers: ['<回答>', '回答：', '回答:'],
+  },
+  {
+    thinking: /<think>([\s\S]*?)<\/think>/i,
+    answer: /<\/think>\s*([\s\S]*)/i,
+    partialThinking: /<think>([\s\S]*)/i,
+    partialAnswer: /<\/think>\s*([\s\S]*)/i,
+    thinkingStart: '<think>',
+    thinkingEnd: '</think>',
+    answerMarkers: ['</think>', '<answer>', '回答：', '回答:'],
+  },
+  {
+    thinking: /思考[：:]\s*([\s\S]*?)(?=\n回答[：:]|$)/,
+    answer: /回答[：:]\s*([\s\S]*)$/,
+    partialThinking: /思考[：:]\s*([\s\S]*)/,
+    partialAnswer: /回答[：:]\s*([\s\S]*)/,
+    thinkingStart: '思考：',
+    thinkingEnd: '',
+    answerMarkers: ['回答：', '回答:'],
+  },
+];
+
+function trimOrNull(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 // 解析思考过程和回答
 function parseContent(content: string, hasPartialThinking: boolean, hasPartialAnswer: boolean) {
-  // 支持两种格式：
-  // 1. XML标签格式：<思考>...</思考><回答>...</回答>
-  // 2. 简单格式：思考：...回答：...
-  const xmlThinkingRegex = /<思考>([\s\S]*?)<\/思考>/;
-  const xmlAnswerRegex = /<回答>([\s\S]*?)<\/回答>/;
-  const simpleThinkingRegex = /思考[：:]\s*([\s\S]*?)(?=\n回答[：:]|$)/;
-  const simpleAnswerRegex = /回答[：:]\s*([\s\S]*)$/;
-
   let thinking = null;
   let answer = content;
+  const pattern = THINKING_BLOCK_PATTERNS.find(
+    candidate =>
+      content.match(candidate.thinking) ||
+      content.match(candidate.partialThinking) ||
+      candidate.answerMarkers.some(marker => content.includes(marker))
+  );
 
-  // 先尝试XML格式
-  let thinkingMatch = content.match(xmlThinkingRegex);
-  let answerMatch = content.match(xmlAnswerRegex);
-
-  // 如果XML格式匹配失败，尝试简单格式
-  if (!thinkingMatch) {
-    thinkingMatch = content.match(simpleThinkingRegex);
-  }
-  if (!answerMatch) {
-    answerMatch = content.match(simpleAnswerRegex);
-  }
+  const thinkingMatch = pattern ? content.match(pattern.thinking) : null;
+  const answerMatch = pattern ? content.match(pattern.answer) : null;
 
   // 如果正在生成思考过程（流式输出）
-  if (hasPartialThinking) {
-    const thinkingStartRegex = /<思考>([\s\S]*)/;
-    const simpleThinkingStartRegex = /思考[：:]\s*([\s\S]*)/;
-
-    let partialMatch = content.match(thinkingStartRegex);
-    if (!partialMatch) {
-      partialMatch = content.match(simpleThinkingStartRegex);
-    }
+  if (pattern && hasPartialThinking) {
+    const partialMatch = content.match(pattern.partialThinking);
 
     if (partialMatch) {
-      const contentText = partialMatch[1].trim();
-      thinking = contentText || null;
+      thinking = trimOrNull(partialMatch[1]);
+      answer = '';
     }
-  } else if (hasPartialAnswer) {
+  } else if (pattern && hasPartialAnswer) {
     // 如果正在生成回答（流式输出）
-    const answerStartRegex = /<回答>([\s\S]*)/;
-    const simpleAnswerStartRegex = /回答[：:]\s*([\s\S]*)/;
+    thinking = trimOrNull(thinkingMatch?.[1]);
 
-    thinking = thinkingMatch ? thinkingMatch[1].trim() : null;
-
-    let answerTextMatch = content.match(answerStartRegex);
-    if (!answerTextMatch) {
-      answerTextMatch = content.match(simpleAnswerStartRegex);
-    }
-
-    const answerText = answerTextMatch ? answerTextMatch[1].trim() : '';
-    answer = answerText || content;
-  } else {
+    const answerTextMatch = content.match(pattern.partialAnswer);
+    const answerText = trimOrNull(answerTextMatch?.[1]);
+    answer = answerText || '';
+  } else if (pattern) {
     // 完整的思考过程和回答
-    const thinkingText = thinkingMatch ? thinkingMatch[1].trim() : '';
-    thinking = thinkingText || null;
-    const answerText = answerMatch ? answerMatch[1].trim() : '';
-    answer = answerText || content;
+    thinking = trimOrNull(thinkingMatch?.[1]);
+    answer = trimOrNull(answerMatch?.[1]) || '';
   }
 
   return { thinking, answer };
@@ -89,10 +98,19 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
 
   // 检测 thinking 是否已完成（检测到 </思考> 标签或"回答："标记）
   useEffect(() => {
-    const hasThinkingEndTag = message.content.includes('</思考>');
-    const hadThinkingEndTag = prevContentRef.current.includes('</思考>');
-    const hasAnswerMarker = message.content.includes('回答：') || message.content.includes('回答:');
-    const hadAnswerMarker = prevContentRef.current.includes('回答：') || prevContentRef.current.includes('回答:');
+    const hasThinkingEndTag =
+      message.content.includes('</思考>') || message.content.toLowerCase().includes('</think>');
+    const hadThinkingEndTag =
+      prevContentRef.current.includes('</思考>') ||
+      prevContentRef.current.toLowerCase().includes('</think>');
+    const hasAnswerMarker =
+      message.content.includes('回答：') ||
+      message.content.includes('回答:') ||
+      message.content.includes('<回答>');
+    const hadAnswerMarker =
+      prevContentRef.current.includes('回答：') ||
+      prevContentRef.current.includes('回答:') ||
+      prevContentRef.current.includes('<回答>');
 
     if ((hasThinkingEndTag && !hadThinkingEndTag) || (hasAnswerMarker && !hadAnswerMarker)) {
       setIsThinkingComplete(true);
@@ -102,14 +120,26 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
   }, [message.content]);
 
   // 检测流式输出中是否正在生成 thinking
-  const hasPartialThinking = !isThinkingComplete &&
-    (message.content.includes('<思考>') || message.content.includes('思考：') || message.content.includes('思考:')) &&
+  const lowerContent = message.content.toLowerCase();
+  const hasPartialThinking =
+    !isThinkingComplete &&
+    (message.content.includes('<思考>') ||
+      lowerContent.includes('<think>') ||
+      message.content.includes('思考：') ||
+      message.content.includes('思考:')) &&
     !message.content.includes('</思考>') &&
-    !(message.content.includes('回答：') || message.content.includes('回答:'));
+    !lowerContent.includes('</think>') &&
+    !(
+      message.content.includes('回答：') ||
+      message.content.includes('回答:') ||
+      message.content.includes('<回答>')
+    );
 
   // 检测流式输出中是否正在生成回答
-  const hasPartialAnswer = (message.content.includes('<回答>') && !message.content.includes('</回答>')) ||
-    (message.content.includes('回答：') || message.content.includes('回答:'));
+  const hasPartialAnswer =
+    (message.content.includes('<回答>') && !message.content.includes('</回答>')) ||
+    (message.content.includes('回答：') || message.content.includes('回答:')) ||
+    lowerContent.includes('</think>');
 
   // 解析内容（传入 hasPartialThinking 和 hasPartialAnswer 以正确处理流式输出）
   const { thinking, answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);

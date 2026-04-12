@@ -22,7 +22,7 @@ impl Default for InferenceParams {
             temperature: 0.7,
             top_p: 0.9,
             top_k: 40,
-            max_tokens: 2048,
+            max_tokens: 512,
             repeat_penalty: 1.1,
         }
     }
@@ -180,9 +180,99 @@ mod imp {
             .and_then(|value| value.parse::<u32>().ok())
     }
 
+    fn gpu_acceleration_enabled() -> bool {
+        cfg!(feature = "native-metal")
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct ContextTuningProfile {
+        pub decode_threads: i32,
+        pub batch_threads: i32,
+        pub n_batch: u32,
+        pub n_ubatch: u32,
+        pub offload_kqv: bool,
+        pub op_offload: bool,
+        pub no_perf: bool,
+    }
+
+    fn parse_env_u32(name: &str) -> Option<u32> {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+    }
+
+    fn clamp_thread_count(value: u32, limit: u32) -> i32 {
+        value.max(1).min(limit.max(1)) as i32
+    }
+
+    pub(crate) fn resolve_context_tuning(
+        requested_threads: u32,
+        ctx_size: u32,
+        gpu_enabled: bool,
+    ) -> ContextTuningProfile {
+        let physical = num_cpus::get_physical().max(1) as u32;
+        let logical = num_cpus::get().max(1) as u32;
+        let ctx_size = ctx_size.max(64);
+        let requested_threads = requested_threads.max(1).min(logical);
+
+        let default_decode_threads = if gpu_enabled {
+            requested_threads.min(match physical {
+                1..=2 => 2,
+                3..=4 => 4,
+                5..=8 => 6,
+                _ => 8,
+            })
+        } else {
+            requested_threads.min(physical)
+        };
+
+        let default_batch_threads = if gpu_enabled {
+            logical.min(requested_threads.max(default_decode_threads))
+        } else {
+            requested_threads
+        };
+
+        let default_n_batch = if gpu_enabled {
+            ctx_size.min(1024)
+        } else {
+            ctx_size.min(512)
+        }
+        .max(64);
+
+        let default_n_ubatch = if gpu_enabled {
+            default_n_batch.min(512)
+        } else {
+            default_n_batch.min(256)
+        }
+        .max(64);
+
+        ContextTuningProfile {
+            decode_threads: clamp_thread_count(
+                parse_env_u32("LOCALTHINKING_DECODE_THREADS").unwrap_or(default_decode_threads),
+                logical,
+            ),
+            batch_threads: clamp_thread_count(
+                parse_env_u32("LOCALTHINKING_BATCH_THREADS").unwrap_or(default_batch_threads),
+                logical,
+            ),
+            n_batch: parse_env_u32("LOCALTHINKING_N_BATCH")
+                .unwrap_or(default_n_batch)
+                .max(64)
+                .min(ctx_size),
+            n_ubatch: parse_env_u32("LOCALTHINKING_N_UBATCH")
+                .unwrap_or(default_n_ubatch)
+                .max(64)
+                .min(default_n_batch)
+                .min(ctx_size),
+            offload_kqv: gpu_enabled,
+            op_offload: gpu_enabled,
+            no_perf: true,
+        }
+    }
+
     impl LlamaCppEngine {
         pub fn new() -> anyhow::Result<Self> {
-            Self::with_config(2048, PromptFormat::ChatML)
+            Self::with_config(1024, PromptFormat::ChatML)
         }
 
         pub fn with_config(ctx_size: u32, fmt: PromptFormat) -> anyhow::Result<Self> {
@@ -252,7 +342,11 @@ mod imp {
         }
 
         pub fn get_gpu_layers(&self) -> u32 {
-            0
+            configured_n_gpu_layers().unwrap_or(0)
+        }
+
+        pub fn gpu_acceleration_enabled(&self) -> bool {
+            gpu_acceleration_enabled()
         }
 
         pub fn generate_stream_with_params<F>(
@@ -293,11 +387,29 @@ mod imp {
             }
 
             eprintln!("[推理] 提示词长度: {} tokens", tokens.len());
+            let tuning = resolve_context_tuning(
+                self.n_threads,
+                self.ctx_size.max(tokens.len().max(64) as u32),
+                gpu_acceleration_enabled(),
+            );
+            eprintln!(
+                "[推理] 上下文调优: decode_threads={}, batch_threads={}, n_batch={}, n_ubatch={}, gpu={}",
+                tuning.decode_threads,
+                tuning.batch_threads,
+                tuning.n_batch,
+                tuning.n_ubatch,
+                gpu_acceleration_enabled(),
+            );
 
             let ctx_params = LlamaContextParams::default()
                 .with_n_ctx(NonZeroU32::new(self.ctx_size))
-                .with_n_threads(self.n_threads as i32)
-                .with_n_threads_batch(self.n_threads as i32);
+                .with_n_threads(tuning.decode_threads)
+                .with_n_threads_batch(tuning.batch_threads)
+                .with_n_batch(tuning.n_batch)
+                .with_n_ubatch(tuning.n_ubatch)
+                .with_offload_kqv(tuning.offload_kqv)
+                .with_op_offload(tuning.op_offload)
+                .with_no_perf(tuning.no_perf);
 
             let mut ctx = model
                 .new_context(&self.backend, ctx_params)
@@ -308,20 +420,25 @@ mod imp {
             let max_tokens = params.max_tokens.max(1) as usize;
 
             {
-                let mut batch = LlamaBatch::new(tokens.len(), 1);
-                for (i, token) in tokens.iter().enumerate() {
-                    let is_last = i == tokens.len() - 1;
-                    if let Err(e) = batch.add(*token, i as i32, &[0], is_last) {
-                        eprintln!("[推理] Batch 添加 token {} 失败: {}", i, e);
-                        return Err(anyhow::anyhow!("Batch 添加失败: {}", e));
+                eprintln!("[推理] 开始分块解码提示词...");
+                for (chunk_idx, chunk) in tokens.chunks(tuning.n_batch as usize).enumerate() {
+                    let start = chunk_idx * tuning.n_batch as usize;
+                    let mut batch = LlamaBatch::new(chunk.len(), 1);
+                    for (offset, token) in chunk.iter().enumerate() {
+                        let position = start + offset;
+                        let is_last = position == tokens.len() - 1;
+                        if let Err(e) = batch.add(*token, position as i32, &[0], is_last) {
+                            eprintln!("[推理] Batch 添加 token {} 失败: {}", position, e);
+                            return Err(anyhow::anyhow!("Batch 添加失败: {}", e));
+                        }
+                    }
+
+                    if let Err(e) = ctx.decode(&mut batch) {
+                        eprintln!("[推理] 提示词解码失败: {}", e);
+                        return Err(anyhow::anyhow!("提示词解码失败: {}", e));
                     }
                 }
-                eprintln!("[推理] 开始解码提示词...");
-                if let Err(e) = ctx.decode(&mut batch) {
-                    eprintln!("[推理] 提示词解码失败: {}", e);
-                    return Err(anyhow::anyhow!("提示词解码失败: {}", e));
-                }
-                eprintln!("[推理] 提示词解码成功");
+                eprintln!("[推理] 提示词分块解码成功");
             }
 
             for token in &tokens {
@@ -488,7 +605,7 @@ mod imp {
                 "physical_cores": num_cpus::get_physical(),
                 "logical_cores": num_cpus::get(),
                 "ctx_size": self.ctx_size,
-                "gpu_acceleration": false,
+                "gpu_acceleration": gpu_acceleration_enabled(),
                 "llama_version": "llama-cpp-2",
                 "native_backend_available": true,
             })
@@ -564,7 +681,7 @@ mod imp {
 
     impl LlamaCppEngine {
         pub fn new() -> anyhow::Result<Self> {
-            Self::with_config(2048, PromptFormat::ChatML)
+            Self::with_config(1024, PromptFormat::ChatML)
         }
 
         pub fn with_config(ctx_size: u32, fmt: PromptFormat) -> anyhow::Result<Self> {
@@ -638,6 +755,10 @@ mod imp {
             0
         }
 
+        pub fn gpu_acceleration_enabled(&self) -> bool {
+            false
+        }
+
         pub fn generate_stream_with_params<F>(
             &self,
             _messages: Vec<Message>,
@@ -703,6 +824,7 @@ mod imp {
                 "native_backend_feature": "llama-cpp-2",
                 "build_features": {
                     "llama-cpp-2": cfg!(feature = "llama-cpp-2"),
+                    "native-metal": cfg!(feature = "native-metal"),
                     "no_llama": cfg!(feature = "no_llama"),
                 }
             })
@@ -711,6 +833,37 @@ mod imp {
 }
 
 pub use imp::LlamaCppEngine;
+
+#[cfg(all(test, feature = "llama-cpp-2"))]
+mod tuning_tests {
+    use super::imp::resolve_context_tuning;
+
+    #[test]
+    fn resolve_context_tuning_prefers_smaller_decode_pool_on_gpu() {
+        let tuning = resolve_context_tuning(8, 4096, true);
+
+        assert_eq!(tuning.decode_threads, 6);
+        assert_eq!(tuning.batch_threads, 8);
+        assert_eq!(tuning.n_batch, 1024);
+        assert_eq!(tuning.n_ubatch, 512);
+        assert!(tuning.op_offload);
+        assert!(tuning.offload_kqv);
+        assert!(tuning.no_perf);
+    }
+
+    #[test]
+    fn resolve_context_tuning_uses_requested_threads_on_cpu() {
+        let tuning = resolve_context_tuning(6, 2048, false);
+
+        assert_eq!(tuning.decode_threads, 6);
+        assert_eq!(tuning.batch_threads, 6);
+        assert_eq!(tuning.n_batch, 512);
+        assert_eq!(tuning.n_ubatch, 256);
+        assert!(!tuning.op_offload);
+        assert!(!tuning.offload_kqv);
+        assert!(tuning.no_perf);
+    }
+}
 
 #[cfg(all(test, feature = "llama-cpp-2"))]
 mod tests {

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   type ChatDoneEvent,
   type ChatErrorEvent,
@@ -35,12 +35,12 @@ export function useChat(
   const {
     sessions,
     activeSessionId,
-    activeSession,
-    messages,
     streaming,
     error,
     tokPerSec,
     tokenCount,
+    draftAssistantMessage,
+    draftSessionId,
     ensureRuntimeInitialized,
     createSession: createStoreSession,
     ensureSession,
@@ -58,6 +58,21 @@ export function useChat(
     setTokPerSec,
     setTokenCount,
   } = useChatStore();
+
+  const activeSession = useMemo(
+    () => sessions.find(session => session.id === activeSessionId) || null,
+    [sessions, activeSessionId]
+  );
+
+  const messages = useMemo(() => {
+    const baseMessages = activeSession?.messages || [];
+
+    if (draftAssistantMessage && draftSessionId && draftSessionId === activeSessionId) {
+      return [...baseMessages, draftAssistantMessage];
+    }
+
+    return baseMessages;
+  }, [activeSession, activeSessionId, draftAssistantMessage, draftSessionId]);
 
   const currentRequestIdRef = useRef<string | null>(null);
   const requestBuffersRef = useRef(new Map<string, string>());

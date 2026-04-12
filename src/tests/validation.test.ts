@@ -6,6 +6,11 @@ import {
   isValidMessage,
   DEFAULT_APP_SETTINGS,
   DEFAULT_MODEL_PARAMS,
+  DEFAULT_SYSTEM_PROMPT,
+  LEGACY_DEFAULT_MODEL_PARAMS,
+  LEGACY_REASONING_SYSTEM_PROMPT,
+  normalizeModelParams,
+  normalizeAppSettings,
 } from '../types';
 
 describe('类型验证函数', () => {
@@ -74,6 +79,45 @@ describe('类型验证函数', () => {
         api_port: '8080', // 应该是 number
       };
       expect(isValidAppSettings(invalid)).toBe(false);
+    });
+  });
+
+  describe('normalizeAppSettings', () => {
+    it('应该将旧的强制思考提示迁移为新的默认提示', () => {
+      const normalized = normalizeAppSettings({
+        model_params: DEFAULT_MODEL_PARAMS,
+        system_prompt: LEGACY_REASONING_SYSTEM_PROMPT,
+        api_enabled: true,
+        api_port: 8080,
+      });
+
+      expect(normalized.system_prompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    });
+
+    it('应该保留用户自定义的系统提示', () => {
+      const normalized = normalizeAppSettings({
+        model_params: DEFAULT_MODEL_PARAMS,
+        system_prompt: '请用一句话回答。',
+        api_enabled: true,
+        api_port: 8080,
+      });
+
+      expect(normalized.system_prompt).toBe('请用一句话回答。');
+    });
+  });
+
+  describe('normalizeModelParams', () => {
+    it('应该将旧的默认参数迁移为新的吞吐优先默认值', () => {
+      expect(normalizeModelParams(LEGACY_DEFAULT_MODEL_PARAMS)).toEqual(DEFAULT_MODEL_PARAMS);
+    });
+
+    it('应该保留用户自定义的模型参数', () => {
+      const customParams = {
+        ...LEGACY_DEFAULT_MODEL_PARAMS,
+        max_tokens: 1024,
+      };
+
+      expect(normalizeModelParams(customParams)).toEqual(customParams);
     });
   });
 

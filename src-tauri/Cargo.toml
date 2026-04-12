@@ -7,6 +7,7 @@ edition = "2021"
 default = ["no_llama"]
 debug = []
 llama-cpp-2 = ["dep:llama-cpp-2"]
+native-metal = ["dep:llama-cpp-2", "llama-cpp-2/metal"]
 no_llama = []
 
 [lib]

@@ -609,14 +609,15 @@ pub fn get_performance_stats(
     let threads = engine.get_threads();
     let ctx_size = engine.get_ctx_size();
     let gpu_layers = engine.get_gpu_layers();
+    let gpu_enabled = engine.gpu_acceleration_enabled();
     let cache_stats = cache.stats();
 
     serde_json::json!({
         "threads": threads,
         "context_size": ctx_size,
         "gpu_layers": gpu_layers,
-        "gpu_enabled": gpu_layers > 0,
-        "estimated_memory_mb": estimate_memory_usage(ctx_size, gpu_layers > 0),
+        "gpu_enabled": gpu_enabled,
+        "estimated_memory_mb": estimate_memory_usage(ctx_size, gpu_enabled),
         "cache": cache_stats,
     })
 }
@@ -655,6 +656,7 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
     let threads = engine.get_threads();
     let ctx_size = engine.get_ctx_size();
     let gpu_layers = engine.get_gpu_layers();
+    let gpu_enabled = engine.gpu_acceleration_enabled();
 
     let mut suggestions = Vec::new();
 
@@ -676,7 +678,7 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
     }
 
     // GPU 建议
-    if gpu_layers == 0 {
+    if !gpu_enabled {
         suggestions.push(
             "提示：当前使用 CPU 推理。如果有 GPU，可以启用 GPU 加速以获得更好的性能。".to_string(),
         );
@@ -688,6 +690,7 @@ pub fn get_optimization_suggestions(state: State<EngineState>) -> serde_json::Va
             "threads": threads,
             "context_size": ctx_size,
             "gpu_layers": gpu_layers,
+            "gpu_enabled": gpu_enabled,
             "physical_cores": physical_cores
         }
     })

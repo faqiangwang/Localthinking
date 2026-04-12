@@ -102,7 +102,9 @@ export function Settings() {
 
       <ThreadsCard
         threads={threads}
-        maxThreads={Math.min(systemInfo?.logical_cores ?? 8, 8)}
+        physicalCores={systemInfo?.physical_cores ?? 4}
+        logicalCores={systemInfo?.logical_cores ?? 8}
+        maxThreads={systemInfo?.logical_cores ?? 8}
         onThreadsChange={setThreads}
         onApply={applyThreads}
       />

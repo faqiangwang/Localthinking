@@ -152,7 +152,7 @@ export interface ChatSession {
 }
 
 // ============ 常量定义 ============
-export const DEFAULT_MODEL_PARAMS: ModelParams = {
+export const LEGACY_DEFAULT_MODEL_PARAMS: ModelParams = {
   temperature: 0.7,
   top_p: 0.9,
   max_tokens: 2048,
@@ -160,9 +160,15 @@ export const DEFAULT_MODEL_PARAMS: ModelParams = {
   repeat_penalty: 1.1,
 };
 
-export const DEFAULT_APP_SETTINGS: AppSettings = {
-  model_params: DEFAULT_MODEL_PARAMS,
-  system_prompt: `你是一个AI助手。回答每个问题时，都要先写出思考过程，再写出最终答案。
+export const DEFAULT_MODEL_PARAMS: ModelParams = {
+  temperature: 0.7,
+  top_p: 0.9,
+  max_tokens: 512,
+  ctx_size: 1024,
+  repeat_penalty: 1.1,
+};
+
+export const LEGACY_REASONING_SYSTEM_PROMPT = `你是一个AI助手。回答每个问题时，都要先写出思考过程，再写出最终答案。
 
 格式要求：
 思考：你的思考过程
@@ -172,7 +178,15 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 思考：用户问的是关于递归的问题。我需要解释什么是递归，然后给出一个例子。
 回答：递归是一种编程技巧...
 
-重要：每次回答都必须包含"思考："和"回答："两部分！`,
+重要：每次回答都必须包含"思考："和"回答："两部分！`;
+
+export const DEFAULT_SYSTEM_PROMPT = `你是一个本地 AI 助手。请直接回答用户问题，保持自然、准确、简洁。
+
+除非用户明确要求，否则不要输出思考过程、推理步骤、链路分析，也不要输出类似 <think>、思考：、回答： 这样的标签。`;
+
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+  model_params: DEFAULT_MODEL_PARAMS,
+  system_prompt: DEFAULT_SYSTEM_PROMPT,
   api_enabled: true,
   api_port: 8080,
 };
@@ -246,8 +260,7 @@ export function cloneAppSettings(settings: AppSettings = DEFAULT_APP_SETTINGS): 
 
 export function normalizeModelParams(obj: unknown): ModelParams {
   const source = typeof obj === 'object' && obj !== null ? (obj as Record<string, unknown>) : {};
-
-  return {
+  const normalized = {
     temperature:
       typeof source.temperature === 'number'
         ? source.temperature
@@ -261,16 +274,29 @@ export function normalizeModelParams(obj: unknown): ModelParams {
         ? source.repeat_penalty
         : DEFAULT_MODEL_PARAMS.repeat_penalty,
   };
+
+  const matchesLegacyDefaults =
+    normalized.temperature === LEGACY_DEFAULT_MODEL_PARAMS.temperature &&
+    normalized.top_p === LEGACY_DEFAULT_MODEL_PARAMS.top_p &&
+    normalized.max_tokens === LEGACY_DEFAULT_MODEL_PARAMS.max_tokens &&
+    normalized.ctx_size === LEGACY_DEFAULT_MODEL_PARAMS.ctx_size &&
+    normalized.repeat_penalty === LEGACY_DEFAULT_MODEL_PARAMS.repeat_penalty;
+
+  return matchesLegacyDefaults ? { ...DEFAULT_MODEL_PARAMS } : normalized;
 }
 
 export function normalizeAppSettings(obj: unknown): AppSettings {
   const defaults = cloneAppSettings();
   const source = typeof obj === 'object' && obj !== null ? (obj as Record<string, unknown>) : {};
+  const normalizedSystemPrompt =
+    typeof source.system_prompt === 'string' &&
+    source.system_prompt.trim() !== LEGACY_REASONING_SYSTEM_PROMPT.trim()
+      ? source.system_prompt
+      : defaults.system_prompt;
 
   return {
     model_params: normalizeModelParams(source.model_params),
-    system_prompt:
-      typeof source.system_prompt === 'string' ? source.system_prompt : defaults.system_prompt,
+    system_prompt: normalizedSystemPrompt,
     api_enabled:
       typeof source.api_enabled === 'boolean' ? source.api_enabled : defaults.api_enabled,
     api_port: typeof source.api_port === 'number' ? source.api_port : defaults.api_port,

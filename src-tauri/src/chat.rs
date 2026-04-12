@@ -72,7 +72,11 @@ pub fn recommend_context_size(messages: &[Message]) -> usize {
 #[allow(dead_code)]
 pub fn detect_format(model_filename: &str) -> PromptFormat {
     let name = model_filename.to_lowercase();
-    if name.contains("llama-3") || name.contains("llama3") {
+    if name.contains("deepseek-r1-distill-llama") || name.contains("distill-llama") {
+        PromptFormat::Llama3
+    } else if name.contains("deepseek-r1-distill-qwen") || name.contains("distill-qwen") {
+        PromptFormat::ChatML
+    } else if name.contains("llama-3") || name.contains("llama3") {
         PromptFormat::Llama3
     } else if name.contains("gemma") {
         PromptFormat::Gemma
@@ -164,5 +168,22 @@ pub fn build_prompt(fmt: &PromptFormat, messages: &[Message]) -> String {
             s.push_str("Assistant: ");
             s
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_format, PromptFormat};
+
+    #[test]
+    fn detects_distill_llama_as_llama3() {
+        let fmt = detect_format("DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf");
+        assert!(matches!(fmt, PromptFormat::Llama3));
+    }
+
+    #[test]
+    fn detects_distill_qwen_as_chatml() {
+        let fmt = detect_format("DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf");
+        assert!(matches!(fmt, PromptFormat::ChatML));
     }
 }
