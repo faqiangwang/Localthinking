@@ -1,3 +1,4 @@
+/* @refresh reset */
 // src/components/Chat.tsx
 // 聊天容器组件（重构后）
 
