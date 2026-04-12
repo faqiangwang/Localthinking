@@ -83,4 +83,19 @@ describe('MessageBubble reasoning fallback', () => {
     expect(screen.queryByText(/用户又发来了/)).not.toBeInTheDocument();
     expect(screen.queryByText('回复生成异常，请重试。')).not.toBeInTheDocument();
   });
+
+  it('隐藏整段用户请求分析式内部独白', () => {
+    render(
+      <MessageBubble
+        message={{
+          role: 'assistant',
+          content:
+            '好的，现在我要分析用户的最新请求：“你给我使用c”。看起来用户可能在输入时出现了问题。接下来，我要考虑用户的使用场景。用户可能在测试我的反应，看看我是否能够识别并给予合适回应。',
+        }}
+      />
+    );
+
+    expect(screen.queryByText(/现在我要分析用户的最新请求/)).not.toBeInTheDocument();
+    expect(screen.getByText('回复生成异常，请重试。')).toBeInTheDocument();
+  });
 });

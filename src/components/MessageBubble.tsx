@@ -40,6 +40,10 @@ const THINKING_BLOCK_PATTERNS = [
 
 const RAW_REASONING_USER_CUES = [
   '用户',
+  '请求',
+  '需求',
+  '输入',
+  '问题',
   '对话历史',
   '回应',
   '回答',
@@ -53,6 +57,15 @@ const RAW_REASONING_PLANNING_CUES = [
   '我应该',
   '我要',
   '我会',
+  '我要分析',
+  '我要考虑',
+  '需要理解',
+  '需要考虑',
+  '引导用户',
+  '测试我的反应',
+  '使用场景',
+  '身份',
+  '打字错误',
   '看起来',
   '意味着',
   '确保回应',
@@ -119,10 +132,39 @@ function isLikelyRawReasoningLine(line: string) {
   );
 }
 
+function isLikelyRawReasoningMessage(content: string) {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const openingMatched =
+    RAW_REASONING_OPENING.test(trimmed) ||
+    /^(接下来|现在|然后)/.test(trimmed);
+  const userCueCount = RAW_REASONING_USER_CUES.filter(cue => trimmed.includes(cue)).length;
+  const planningCueCount = RAW_REASONING_PLANNING_CUES.filter(cue => trimmed.includes(cue)).length;
+
+  if (openingMatched && userCueCount >= 1 && planningCueCount >= 1) {
+    return true;
+  }
+
+  const sentenceLikeParts = trimmed
+    .split(/[。！？!?\n]/)
+    .map(part => part.trim())
+    .filter(Boolean);
+  const reasoningParts = sentenceLikeParts.filter(isLikelyRawReasoningLine);
+
+  return reasoningParts.length >= 2 && reasoningParts.length >= Math.ceil(sentenceLikeParts.length / 2);
+}
+
 function sanitizeRawReasoningContent(content: string, streaming: boolean) {
   const normalized = content.replace(/\r/g, '').trim();
   if (!normalized) {
     return null;
+  }
+
+  if (isLikelyRawReasoningMessage(normalized)) {
+    return streaming ? '' : '回复生成异常，请重试。';
   }
 
   const paragraphs = normalized
