@@ -46,7 +46,7 @@ struct ChatErrorEvent {
 
 fn calculate_tok_per_sec(started_at: Instant, n_tokens: usize) -> f64 {
     let elapsed = started_at.elapsed().as_secs_f64();
-    if elapsed > 0.0 {
+    if elapsed > f64::EPSILON {
         n_tokens as f64 / elapsed
     } else {
         0.0
@@ -237,21 +237,27 @@ pub async fn chat_stream(
 
     let mut token_count = 0;
     let mut content = String::new();
+    let mut decode_started_at: Option<Instant> = None;
 
     while let Some(token) = rx.recv().await {
         if token.is_empty() {
             continue;
         }
 
+        if decode_started_at.is_none() {
+            decode_started_at = Some(Instant::now());
+        }
+
         token_count += 1;
         content.push_str(&token);
+        let throughput_started_at = decode_started_at.unwrap_or(started_at);
         let _ = window.emit(
             "chat://token",
             &ChatTokenEvent {
                 request_id: request_id.clone(),
                 content: token,
                 n_tokens: token_count,
-                tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                tok_per_sec: calculate_tok_per_sec(throughput_started_at, token_count),
             },
         );
     }
@@ -266,7 +272,10 @@ pub async fn chat_stream(
                 &ChatDoneEvent {
                     request_id,
                     n_tokens: token_count,
-                    tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                    tok_per_sec: calculate_tok_per_sec(
+                        decode_started_at.unwrap_or(started_at),
+                        token_count,
+                    ),
                 },
             );
             eprintln!("[INFO] chat_stream 完成，共发送 {} tokens", token_count);
@@ -280,7 +289,10 @@ pub async fn chat_stream(
                     request_id,
                     error: message.clone(),
                     n_tokens: token_count,
-                    tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                    tok_per_sec: calculate_tok_per_sec(
+                        decode_started_at.unwrap_or(started_at),
+                        token_count,
+                    ),
                 },
             );
             Err(message)
@@ -293,7 +305,10 @@ pub async fn chat_stream(
                     request_id,
                     error: message.clone(),
                     n_tokens: token_count,
-                    tok_per_sec: calculate_tok_per_sec(started_at, token_count),
+                    tok_per_sec: calculate_tok_per_sec(
+                        decode_started_at.unwrap_or(started_at),
+                        token_count,
+                    ),
                 },
             );
             Err(message)

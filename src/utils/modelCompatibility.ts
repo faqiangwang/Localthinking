@@ -13,7 +13,7 @@ export function isDeepSeekFullModel(path: string): boolean {
   );
 }
 
-export function requiresCpuMoeCompatibilityMode(path: string): boolean {
+export function isMoeModel(path: string): boolean {
   const fileName = extractLowercaseFileName(path);
   return (
     fileName.includes('mixtral') ||
@@ -23,4 +23,8 @@ export function requiresCpuMoeCompatibilityMode(path: string): boolean {
     /\ba\d+b\b/.test(fileName) ||
     isDeepSeekFullModel(path)
   );
+}
+
+export function supportsCpuMoeFallback(path: string): boolean {
+  return isMoeModel(path);
 }

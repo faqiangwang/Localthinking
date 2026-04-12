@@ -201,6 +201,18 @@ mod imp {
             .and_then(|value| value.parse::<u32>().ok())
     }
 
+    fn parse_env_flag(name: &str) -> bool {
+        std::env::var(name)
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
     fn clamp_thread_count(value: u32, limit: u32) -> i32 {
         value.max(1).min(limit.max(1)) as i32
     }
@@ -268,6 +280,41 @@ mod imp {
             op_offload: gpu_enabled,
             no_perf: true,
         }
+    }
+
+    fn log_moe_compatibility(decision: &MoeCompatibilityDecision, source: &str) {
+        let architecture = decision
+            .metadata
+            .architecture
+            .as_deref()
+            .unwrap_or("unknown");
+        eprintln!(
+            "[模型] {} \
+             (source={}, arch={}, expert_count={:?}, expert_used_count={:?}, moe_every_n_layers={:?})",
+            source,
+            decision.source,
+            architecture,
+            decision.metadata.expert_count,
+            decision.metadata.expert_used_count,
+            decision.metadata.moe_every_n_layers,
+        );
+    }
+
+    fn build_model_params(
+        configured_gpu_layers: Option<u32>,
+        use_cpu_moe_override: bool,
+    ) -> std::pin::Pin<Box<LlamaModelParams>> {
+        let base_model_params = match configured_gpu_layers {
+            Some(n_gpu_layers) => LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers),
+            None => LlamaModelParams::default(),
+        };
+        let mut model_params = Box::pin(base_model_params);
+
+        if use_cpu_moe_override {
+            model_params.as_mut().add_cpu_moe_override();
+        }
+
+        model_params
     }
 
     impl LlamaCppEngine {
@@ -525,39 +572,55 @@ mod imp {
                 return Err(anyhow::anyhow!("模型文件不存在: {}", path));
             }
 
-            let base_model_params = match configured_n_gpu_layers() {
-                Some(n_gpu_layers) => {
-                    eprintln!(
-                        "[模型] 使用 LOCALTHINKING_N_GPU_LAYERS={} 覆盖 GPU 层数",
-                        n_gpu_layers
-                    );
-                    LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers)
-                }
-                None => LlamaModelParams::default(),
-            };
-            let mut model_params = Box::pin(base_model_params);
-            let moe_compatibility = resolve_moe_compatibility(path);
-            if moe_compatibility.enable_cpu_override {
-                let architecture = moe_compatibility
-                    .metadata
-                    .architecture
-                    .as_deref()
-                    .unwrap_or("unknown");
+            let configured_gpu_layers = configured_n_gpu_layers();
+            if let Some(n_gpu_layers) = configured_gpu_layers {
                 eprintln!(
-                    "[模型] 检测到 MoE 模型，启用 CPU MoE 兼容模式 \
-                     (source={}, arch={}, expert_count={:?}, expert_used_count={:?}, moe_every_n_layers={:?})",
-                    moe_compatibility.source,
-                    architecture,
-                    moe_compatibility.metadata.expert_count,
-                    moe_compatibility.metadata.expert_used_count,
-                    moe_compatibility.metadata.moe_every_n_layers,
+                    "[模型] 使用 LOCALTHINKING_N_GPU_LAYERS={} 覆盖 GPU 层数",
+                    n_gpu_layers
                 );
-                model_params.as_mut().add_cpu_moe_override();
             }
 
-            let model =
+            let moe_compatibility = resolve_moe_compatibility(path);
+            let force_cpu_moe = parse_env_flag("LOCALTHINKING_FORCE_CPU_MOE");
+            let disable_cpu_moe_fallback = parse_env_flag("LOCALTHINKING_DISABLE_CPU_MOE_FALLBACK");
+
+            let load_with_params = |use_cpu_moe_override: bool| {
+                let model_params = build_model_params(configured_gpu_layers, use_cpu_moe_override);
                 LlamaModel::load_from_file(&self.backend, path, model_params.as_ref().get_ref())
-                    .map_err(|e| anyhow::anyhow!("模型加载失败: {}", e))?;
+            };
+
+            let model = if moe_compatibility.enable_cpu_override && force_cpu_moe {
+                log_moe_compatibility(
+                    &moe_compatibility,
+                    "检测到 MoE 模型，按 LOCALTHINKING_FORCE_CPU_MOE 强制启用 CPU MoE 兼容模式",
+                );
+                load_with_params(true).map_err(|e| anyhow::anyhow!("模型加载失败: {}", e))?
+            } else {
+                match load_with_params(false) {
+                    Ok(model) => {
+                        if moe_compatibility.enable_cpu_override {
+                            log_moe_compatibility(
+                                &moe_compatibility,
+                                "检测到 MoE 模型，原生加载成功，保留 GPU/Metal 执行路径",
+                            );
+                        }
+                        model
+                    }
+                    Err(error)
+                        if moe_compatibility.enable_cpu_override && !disable_cpu_moe_fallback =>
+                    {
+                        log_moe_compatibility(
+                            &moe_compatibility,
+                            "检测到 MoE 模型，原生加载失败，回退到 CPU MoE 兼容模式",
+                        );
+                        eprintln!("[模型] 原生 MoE 加载失败: {}", error);
+                        load_with_params(true).map_err(|fallback_error| {
+                            anyhow::anyhow!("模型加载失败: {}", fallback_error)
+                        })?
+                    }
+                    Err(error) => return Err(anyhow::anyhow!("模型加载失败: {}", error)),
+                }
+            };
 
             if let Ok(mut model_guard) = self.model.lock() {
                 *model_guard = Some(model);
