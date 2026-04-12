@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { useCallback, useEffect } from 'react';
 import { type LocalModelEntry, type SystemInfo } from '../types';
 import { useModelStore } from '../store';
-import { getUnsupportedModelReason } from '../utils/modelCompatibility';
 
 interface LoadModelResult {
   success: boolean;
@@ -67,15 +66,6 @@ export function useModel() {
       if (modelLoaded && modelPath === path) {
         clearError();
         return { success: true };
-      }
-
-      const unsupportedReason = getUnsupportedModelReason(path);
-      if (unsupportedReason) {
-        setError(unsupportedReason);
-        return {
-          success: false,
-          error: unsupportedReason,
-        };
       }
 
       if (!silent) {

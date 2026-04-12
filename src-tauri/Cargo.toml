@@ -20,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 tauri            = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-llama-cpp-2     = { version = "0.1", features = ["sampler"], optional = true }
+llama-cpp-2     = { version = "=0.1.143", features = ["sampler"], optional = true }
 encoding_rs     = "0.8"           # 用于 token 转字符串的编码器
 tokio           = { version = "1", features = ["full"] }
 serde           = { version = "1", features = ["derive"] }
@@ -51,9 +51,11 @@ panic         = "abort"         # 减小二进制大小
 # `cargo build --no-default-features --features llama-cpp-2`
 # and ensure `cmake` is installed on the system.
 
-## [patch.crates-io]
-## When you place a local copy of the llama-cpp-2 (llama.cpp based) source
-## into `src-tauri/vendor/llama-cpp-2`, Cargo will use the local path for
-## the `llama-cpp-2` crate. This is useful for offline patching and testing.
-## To enable, uncomment the following lines after placing the vendor source.
-## llama-cpp-2 = { path = "vendor/llama-cpp-2" }
+[patch.crates-io]
+# Vendored snapshot from the local Cargo registry:
+# - llama-cpp-2 0.1.143
+# - llama-cpp-sys-2 0.1.143
+# - upstream crate repo: utilityai/llama-cpp-rs
+# - vendored sys snapshot sha: b25863e1422d0c8fe09b5efbcbc0481345b7d003
+llama-cpp-2 = { path = "vendor/llama-cpp-2" }
+llama-cpp-sys-2 = { path = "vendor/llama-cpp-sys-2" }

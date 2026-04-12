@@ -24,14 +24,3 @@ export function requiresCpuMoeCompatibilityMode(path: string): boolean {
     isDeepSeekFullModel(path)
   );
 }
-
-export function getUnsupportedModelReason(path: string): string | null {
-  if (!isDeepSeekFullModel(path)) {
-    return null;
-  }
-
-  return [
-    '当前版本对这类全量 DeepSeek MoE 模型仍不稳定，可能在首次推理时直接崩溃。',
-    '建议优先改用 distill 或 dense 模型，例如 Qwen2.5-7B、DeepSeek-R1-Distill-Qwen-8B、DeepSeek-R1-Distill-Llama-8B、Gemma-2-2B。',
-  ].join('\n\n');
-}

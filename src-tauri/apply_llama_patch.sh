@@ -1,36 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 用途：对本地 vendor/llama-cpp-2 源进行最小化修补，移除或保护 MSVC-only 标志（如 /utf-8）。
-# 使用场景：主机无法联网或无法直接安装 cmake 时，先准备修补好的源码，待环境准备完再构建。
+# 用途：对 vendored `llama-cpp-2` / `llama-cpp-sys-2` 快照进行最小化修补。
+# 当前默认修补是同步 `add_cpu_moe_override()` 的正则，使其覆盖 `gate_up`
+# 等更新的 MoE tensor 命名。
 
-VENDOR_DIR="$(dirname "$0")/vendor/llama-cpp-2"
+ROOT_DIR="$(dirname "$0")/vendor"
+LLAMA_CRATE_DIR="$ROOT_DIR/llama-cpp-2"
+LLAMA_SYS_DIR="$ROOT_DIR/llama-cpp-sys-2"
 
-if [ ! -d "$VENDOR_DIR" ]; then
-  echo "未找到源码目录：$VENDOR_DIR"
-  echo "请将 llama.cpp 源码放到该目录，或在有网络时运行："
-  echo "  git clone https://github.com/ggerganov/llama.cpp $VENDOR_DIR"
+if [ ! -d "$LLAMA_CRATE_DIR" ] || [ ! -d "$LLAMA_SYS_DIR" ]; then
+  echo "未找到 vendored crate 目录："
+  echo "  $LLAMA_CRATE_DIR"
+  echo "  $LLAMA_SYS_DIR"
   exit 1
 fi
 
-echo "应用最小化修补到 $VENDOR_DIR"
+PARAMS_FILE="$LLAMA_CRATE_DIR/src/model/params.rs"
 
-# 1) 移除所有出现的 /utf-8 标志（MSVC-only）
-#    macOS 的 sed 需要 -i ''，其他系统可能需要 -i
-find "$VENDOR_DIR" -type f -name CMakeLists.txt -print0 | while IFS= read -r -d '' f; do
-  echo "修补 $f"
-  # 备份
-  cp "$f" "$f.bak" || true
-  # 删除出现的 /utf-8
-  sed -E "s#(/utf-8)##g" "$f.bak" > "$f"
-done
+if [ ! -f "$PARAMS_FILE" ]; then
+  echo "未找到目标文件：$PARAMS_FILE"
+  exit 1
+fi
 
-# 2) 其他常见 MSVC-only 选项（示例）：/Z7 /utf-8 /GL
-#    这里做一次保守替换（删除斜杠开头的 MSVC 样式标志），仅作为示例
-#    你可以按需扩展或把更复杂的 CMake 条件逻辑加入文件
+echo "修补 $PARAMS_FILE"
+cp "$PARAMS_FILE" "$PARAMS_FILE.bak" || true
 
-# 注意：自动替换可能不完全安全——建议在版本控制下 review 改动。
+python3 - <<'PY' "$PARAMS_FILE"
+from pathlib import Path
+import sys
 
-echo "修补完成。请检查改动并在 src-tauri/Cargo.toml 中添加：\n\n[patch.crates-io]\nllama-cpp-2 = { path = \"src-tauri/vendor/llama-cpp-2\" }\n\n然后在具备 cmake 的主机上运行：\n\ncd src-tauri\ncargo build -vv --no-default-features --features llama-cpp-2\n"
+path = Path(sys.argv[1])
+text = path.read_text()
+old = 'self.add_cpu_buft_override(c"\\\\.ffn_(up|down|gate)_(ch|)exps");'
+new = 'self.add_cpu_buft_override(c"blk\\\\.\\\\d+\\\\.ffn_(up|down|gate_up|gate)_(ch|)exps");'
+if old in text:
+    path.write_text(text.replace(old, new))
+PY
+
+echo "修补完成。接下来运行："
+echo
+echo "  cd src-tauri"
+echo "  cargo build -vv --no-default-features --features llama-cpp-2"
 
 exit 0

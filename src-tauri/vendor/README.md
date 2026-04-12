@@ -1,12 +1,23 @@
-把 `llama.cpp` 源放到此目录以启用本地修补
+此目录已经包含可复现的 vendored `llama.cpp` Rust 绑定快照：
 
-说明：
-1. 在项目根路径下，创建目录 `src-tauri/vendor/llama-cpp-2`，并将上游的 `llama.cpp` 源（或者你自己的 fork）完整拷贝到该目录。
-2. 运行仓库中已有的补丁脚本以移除/保护 MSVC-only 标志：
-   chmod +x src-tauri/apply_llama_patch.sh
-   src-tauri/apply_llama_patch.sh
-3. 在具备 `cmake` 的主机上运行：
-   cd src-tauri
-   cargo build -vv --no-default-features --features llama-cpp-2
+- `llama-cpp-2 0.1.143`
+- `llama-cpp-sys-2 0.1.143`
+- `llama-cpp-sys-2` 对应的上游仓库提交：`b25863e1422d0c8fe09b5efbcbc0481345b7d003`
 
-提示：如果你希望我替你 clone 并应用补丁（需网络），告诉我我会尝试；当前环境网络被阻断，所以请手动把源码放到这里，或在一台可联网机器上完成。
+当前本地补丁：
+
+1. 根 `Cargo.toml` 通过 `[patch.crates-io]` 强制使用本目录。
+2. `vendor/llama-cpp-2/src/model/params.rs` 的 `add_cpu_moe_override()` 已对齐到更新的 MoE tensor pattern，覆盖 `gate_up` 等现代架构张量。
+
+构建方式：
+
+```bash
+cd src-tauri
+cargo build -vv --no-default-features --features llama-cpp-2
+```
+
+如果后续要升级版本，推荐流程：
+
+1. 从 Cargo registry 或上游仓库更新 `llama-cpp-2` / `llama-cpp-sys-2`。
+2. 保留根 `[patch.crates-io]`。
+3. 重新检查 `add_cpu_moe_override()` 是否仍需要本地补丁。

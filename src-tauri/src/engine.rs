@@ -33,6 +33,7 @@ mod imp {
     use super::*;
     use encoding_rs::UTF_8;
     use llama_cpp_2::context::params::LlamaContextParams;
+    use llama_cpp_2::gguf::GgufContext;
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
     use llama_cpp_2::model::params::LlamaModelParams;
@@ -58,7 +59,22 @@ mod imp {
     unsafe impl Send for LlamaCppEngine {}
     unsafe impl Sync for LlamaCppEngine {}
 
-    fn requires_cpu_moe_override(path: &str) -> bool {
+    #[derive(Debug, Clone, Default)]
+    struct GgufModelMetadata {
+        architecture: Option<String>,
+        expert_count: Option<u32>,
+        expert_used_count: Option<u32>,
+        moe_every_n_layers: Option<u32>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MoeCompatibilityDecision {
+        enable_cpu_override: bool,
+        source: &'static str,
+        metadata: GgufModelMetadata,
+    }
+
+    fn filename_suggests_moe(path: &str) -> bool {
         let file_name = Path::new(path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -82,6 +98,86 @@ mod imp {
                             .chars()
                             .all(|character| character.is_ascii_digit())
                 })
+    }
+
+    fn gguf_u32_value(context: &GgufContext, key: &str) -> Option<u32> {
+        let idx = context.find_key(key);
+        if idx < 0 {
+            return None;
+        }
+
+        Some(context.val_u32(idx))
+    }
+
+    fn gguf_string_value(context: &GgufContext, key: &str) -> Option<String> {
+        let idx = context.find_key(key);
+        if idx < 0 {
+            return None;
+        }
+
+        context.val_str(idx).map(str::to_owned)
+    }
+
+    fn read_gguf_model_metadata(path: &str) -> Option<GgufModelMetadata> {
+        let context = GgufContext::from_file(Path::new(path))?;
+        let architecture = gguf_string_value(&context, "general.architecture");
+        let expert_count_key = architecture
+            .as_deref()
+            .map(|arch| format!("{arch}.expert_count"));
+        let expert_used_count_key = architecture
+            .as_deref()
+            .map(|arch| format!("{arch}.expert_used_count"));
+        let moe_every_n_layers_key = architecture
+            .as_deref()
+            .map(|arch| format!("{arch}.moe_every_n_layers"));
+
+        Some(GgufModelMetadata {
+            architecture,
+            expert_count: expert_count_key
+                .as_deref()
+                .and_then(|key| gguf_u32_value(&context, key)),
+            expert_used_count: expert_used_count_key
+                .as_deref()
+                .and_then(|key| gguf_u32_value(&context, key)),
+            moe_every_n_layers: moe_every_n_layers_key
+                .as_deref()
+                .and_then(|key| gguf_u32_value(&context, key)),
+        })
+    }
+
+    fn resolve_moe_compatibility(path: &str) -> MoeCompatibilityDecision {
+        let metadata = read_gguf_model_metadata(path).unwrap_or_default();
+        let metadata_detected = metadata.expert_count.unwrap_or(0) > 1
+            || metadata.expert_used_count.unwrap_or(0) > 1
+            || metadata.moe_every_n_layers.unwrap_or(0) > 0;
+
+        if metadata_detected {
+            return MoeCompatibilityDecision {
+                enable_cpu_override: true,
+                source: "gguf",
+                metadata,
+            };
+        }
+
+        if filename_suggests_moe(path) {
+            return MoeCompatibilityDecision {
+                enable_cpu_override: true,
+                source: "filename",
+                metadata,
+            };
+        }
+
+        MoeCompatibilityDecision {
+            enable_cpu_override: false,
+            source: "none",
+            metadata,
+        }
+    }
+
+    fn configured_n_gpu_layers() -> Option<u32> {
+        std::env::var("LOCALTHINKING_N_GPU_LAYERS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
     }
 
     impl LlamaCppEngine {
@@ -234,6 +330,7 @@ mod imp {
 
             let mut n_cur = 0usize;
             let mut last_position = (tokens.len() - 1) as i32;
+            let mut logits_idx = last_position;
 
             loop {
                 if n_cur >= max_tokens {
@@ -245,10 +342,10 @@ mod imp {
                     break;
                 }
 
-                let token_to_generate = sampler.sample(&ctx, last_position);
+                let token_to_generate = sampler.sample(&ctx, logits_idx);
                 eprintln!(
-                    "[推理] Loop {}: 采样 token ID: {} at pos {}",
-                    n_cur, token_to_generate, last_position
+                    "[推理] Loop {}: 采样 token ID: {} at pos {} (logits idx {})",
+                    n_cur, token_to_generate, last_position, logits_idx
                 );
 
                 if model.is_eog_token(token_to_generate) {
@@ -288,6 +385,7 @@ mod imp {
                 }
 
                 last_position = batch_pos;
+                logits_idx = 0;
             }
 
             eprintln!("[推理] 生成完成，共 {} tokens", n_cur);
@@ -310,9 +408,33 @@ mod imp {
                 return Err(anyhow::anyhow!("模型文件不存在: {}", path));
             }
 
-            let mut model_params = Box::pin(LlamaModelParams::default());
-            if requires_cpu_moe_override(path) {
-                eprintln!("[模型] 检测到 MoE 模型，启用 CPU MoE 兼容模式");
+            let base_model_params = match configured_n_gpu_layers() {
+                Some(n_gpu_layers) => {
+                    eprintln!(
+                        "[模型] 使用 LOCALTHINKING_N_GPU_LAYERS={} 覆盖 GPU 层数",
+                        n_gpu_layers
+                    );
+                    LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers)
+                }
+                None => LlamaModelParams::default(),
+            };
+            let mut model_params = Box::pin(base_model_params);
+            let moe_compatibility = resolve_moe_compatibility(path);
+            if moe_compatibility.enable_cpu_override {
+                let architecture = moe_compatibility
+                    .metadata
+                    .architecture
+                    .as_deref()
+                    .unwrap_or("unknown");
+                eprintln!(
+                    "[模型] 检测到 MoE 模型，启用 CPU MoE 兼容模式 \
+                     (source={}, arch={}, expert_count={:?}, expert_used_count={:?}, moe_every_n_layers={:?})",
+                    moe_compatibility.source,
+                    architecture,
+                    moe_compatibility.metadata.expert_count,
+                    moe_compatibility.metadata.expert_used_count,
+                    moe_compatibility.metadata.moe_every_n_layers,
+                );
                 model_params.as_mut().add_cpu_moe_override();
             }
 
@@ -589,3 +711,53 @@ mod imp {
 }
 
 pub use imp::LlamaCppEngine;
+
+#[cfg(all(test, feature = "llama-cpp-2"))]
+mod tests {
+    use super::*;
+    use crate::backend::Message;
+
+    #[test]
+    #[ignore = "requires LOCALTHINKING_MOE_MODEL_PATH to point at a local MoE GGUF"]
+    fn moe_model_loads_and_generates() -> anyhow::Result<()> {
+        let model_path = std::env::var("LOCALTHINKING_MOE_MODEL_PATH")
+            .map_err(|_| anyhow::anyhow!("缺少环境变量 LOCALTHINKING_MOE_MODEL_PATH"))?;
+
+        std::env::set_var("LOCALTHINKING_N_GPU_LAYERS", "0");
+
+        let mut engine = LlamaCppEngine::new()?;
+        engine.set_ctx_size(1024);
+        engine.set_threads(4);
+        engine.set_model_path(&model_path);
+        engine.load_model(&model_path)?;
+
+        let tokens = Arc::new(Mutex::new(String::new()));
+        let output = Arc::clone(&tokens);
+
+        engine.generate_stream_with_params(
+            vec![Message {
+                role: "user".to_string(),
+                content: "Reply with exactly one short sentence about mixture of experts."
+                    .to_string(),
+            }],
+            InferenceParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 40,
+                max_tokens: 48,
+                repeat_penalty: 1.0,
+            },
+            move |chunk| {
+                output.lock().unwrap().push_str(&chunk);
+            },
+        )?;
+
+        let generated = tokens.lock().unwrap().trim().to_string();
+        assert!(
+            !generated.is_empty(),
+            "MoE smoke test did not generate any text"
+        );
+
+        Ok(())
+    }
+}
