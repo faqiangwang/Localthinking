@@ -180,16 +180,16 @@ pub async fn chat_stream(
     eprintln!("[INFO] chat_stream 开始，收到 {} 条消息", messages.len());
 
     // 检查模型是否已加载
-    let (loaded, fmt, model_identity, prompt_tokens) = {
+    let (loaded, model_identity, prompt_tokens, prompt) = {
         let engine = state.lock().unwrap_or_else(|p| p.into_inner());
         (
             engine.is_model_loaded(),
-            engine.fmt.clone(),
             engine
                 .model_path
                 .clone()
                 .unwrap_or_else(|| engine.model_name.clone()),
             engine.count_prompt_tokens(&messages).unwrap_or(0),
+            engine.render_prompt(&messages).unwrap_or_default(),
         )
     };
 
@@ -217,7 +217,6 @@ pub async fn chat_stream(
     let engine_for_task = state.inner().clone();
     let msgs = messages.clone();
     let (inference_params, ctx_size) = sanitize_chat_generation_params(params);
-    let prompt = crate::chat::build_prompt(&fmt, &messages);
     let cache_params =
         build_generation_cache_params_key(&model_identity, ctx_size, &inference_params);
 

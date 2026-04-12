@@ -15,7 +15,7 @@ pub struct CachedInference {
 #[derive(Clone)]
 struct CacheEntry {
     result: CachedInference,
-    timestamp: u64,
+    timestamp_ns: u128,
     hit_count: u32,
 }
 
@@ -68,11 +68,13 @@ impl InferenceCache {
     pub fn get(&self, prompt: &str, params: &str) -> Option<CachedInference> {
         let key = self.generate_key(prompt, params);
         let mut cache = self.cache.lock().ok()?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_nanos();
 
         if let Some(entry) = cache.get_mut(&key) {
             // 检查是否过期
-            if now - entry.timestamp > self.ttl_seconds {
+            if now_ns.saturating_sub(entry.timestamp_ns)
+                > u128::from(self.ttl_seconds) * 1_000_000_000
+            {
                 cache.remove(&key);
                 return None;
             }
@@ -90,19 +92,19 @@ impl InferenceCache {
     pub fn set(&self, prompt: &str, params: &str, content: &str, token_count: usize) {
         let key = self.generate_key(prompt, params);
         let mut cache = self.cache.lock().unwrap();
-        let now = SystemTime::now()
+        let now_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_nanos();
 
         // 如果缓存已满，删除最旧的条目
         if cache.len() >= self.max_size {
             let mut oldest_key = None;
-            let mut oldest_time = u64::MAX;
+            let mut oldest_time = u128::MAX;
 
             for (k, v) in cache.iter() {
-                if v.timestamp < oldest_time {
-                    oldest_time = v.timestamp;
+                if v.timestamp_ns < oldest_time {
+                    oldest_time = v.timestamp_ns;
                     oldest_key = Some(k.clone());
                 }
             }
@@ -118,7 +120,7 @@ impl InferenceCache {
                 content: content.to_string(),
                 token_count,
             },
-            timestamp: now,
+            timestamp_ns: now_ns,
             hit_count: 0,
         };
 

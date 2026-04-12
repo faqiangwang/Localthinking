@@ -68,6 +68,7 @@ mod imp {
     use llama_cpp_2::gguf::GgufContext;
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
+    use llama_cpp_2::openai::OpenAIChatTemplateParams;
     use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::model::{AddBos, LlamaModel};
     use llama_cpp_2::sampling::LlamaSampler;
@@ -469,11 +470,79 @@ mod imp {
             let model = model_guard
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("模型未初始化"))?;
-            let prompt = crate::chat::build_prompt(&self.fmt, messages);
+            let prompt = self.render_prompt_with_model(model, messages);
             let tokens = model
                 .str_to_token(&prompt, AddBos::Always)
                 .map_err(|e| anyhow::anyhow!("分词失败: {}", e))?;
             Ok(tokens.len())
+        }
+
+        pub fn render_prompt(&self, messages: &[Message]) -> anyhow::Result<String> {
+            if !self.is_model_loaded() {
+                return Err(anyhow::anyhow!("模型未加载"));
+            }
+
+            let model_guard = self
+                .model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("模型锁获取失败: {}", e))?;
+            let model = model_guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("模型未初始化"))?;
+
+            Ok(self.render_prompt_with_model(model, messages))
+        }
+
+        fn render_prompt_with_model(&self, model: &LlamaModel, messages: &[Message]) -> String {
+            let fallback_prompt = crate::chat::build_prompt(&self.fmt, messages);
+
+            let template = match model.chat_template(None) {
+                Ok(template) => template,
+                Err(error) => {
+                    eprintln!("[推理] 模型未提供 chat template，回退手写模板: {}", error);
+                    return fallback_prompt;
+                }
+            };
+
+            let messages_json = match serde_json::to_string(messages) {
+                Ok(json) => json,
+                Err(error) => {
+                    eprintln!("[推理] 消息序列化失败，回退手写模板: {}", error);
+                    return fallback_prompt;
+                }
+            };
+
+            let params = OpenAIChatTemplateParams {
+                messages_json: &messages_json,
+                tools_json: None,
+                tool_choice: None,
+                json_schema: None,
+                grammar: None,
+                reasoning_format: None,
+                chat_template_kwargs: None,
+                add_generation_prompt: true,
+                use_jinja: true,
+                parallel_tool_calls: false,
+                enable_thinking: false,
+                add_bos: false,
+                add_eos: false,
+                parse_tool_calls: false,
+            };
+
+            match model.apply_chat_template_oaicompat(&template, &params) {
+                Ok(result) if !result.prompt.is_empty() => {
+                    eprintln!("[推理] 使用模型内置 chat template 渲染提示词");
+                    result.prompt
+                }
+                Ok(_) => {
+                    eprintln!("[推理] 模型 chat template 返回空提示词，回退手写模板");
+                    fallback_prompt
+                }
+                Err(error) => {
+                    eprintln!("[推理] 应用模型 chat template 失败，回退手写模板: {}", error);
+                    fallback_prompt
+                }
+            }
         }
 
         pub fn generate_stream_with_params<F>(
@@ -501,7 +570,7 @@ mod imp {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("模型未初始化"))?;
 
-            let prompt = crate::chat::build_prompt(&self.fmt, &messages);
+            let prompt = self.render_prompt_with_model(model, &messages);
             eprintln!("[推理] 提示词:\n{}", prompt);
 
             let tokens = model
