@@ -254,6 +254,51 @@ pub fn sanitize_assistant_message_content(content: &str) -> Option<String> {
     }
 }
 
+pub fn extract_visible_assistant_content(content: &str, streaming: bool) -> String {
+    let normalized = content.replace('\r', "");
+    let normalized = normalized.trim();
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    if let Some(idx) = normalized.rfind("</think>") {
+        return normalized[idx + "</think>".len()..].trim().to_string();
+    }
+
+    if let Some(idx) = normalized.find("<回答>") {
+        return normalized[idx + "<回答>".len()..]
+            .replace("</回答>", "")
+            .trim()
+            .to_string();
+    }
+
+    if let Some(idx) = normalized.rfind("回答：") {
+        return normalized[idx + "回答：".len()..].trim().to_string();
+    }
+
+    if let Some(idx) = normalized.rfind("回答:") {
+        return normalized[idx + "回答:".len()..].trim().to_string();
+    }
+
+    if normalized.contains("<think>")
+        || normalized.contains("<思考>")
+        || normalized.starts_with("思考：")
+        || normalized.starts_with("思考:")
+    {
+        return String::new();
+    }
+
+    if is_likely_internal_reasoning_message(normalized) {
+        if streaming {
+            String::new()
+        } else {
+            sanitize_assistant_message_content(normalized).unwrap_or_default()
+        }
+    } else {
+        normalized.to_string()
+    }
+}
+
 pub fn sanitize_messages_for_inference(messages: &[Message]) -> Vec<Message> {
     let mut sanitized: Vec<Message> = messages
         .iter()

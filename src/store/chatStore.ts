@@ -73,7 +73,32 @@ function normalizeSessions(value: unknown): ChatSession[] {
     return [];
   }
 
-  return value.filter(isValidChatSession).slice(-MAX_SESSIONS);
+  return value
+    .filter(isValidChatSession)
+    .map(session => ({
+      ...session,
+      messages: session.messages.filter(
+        message =>
+          !(
+            message.role === 'assistant' &&
+            isTransientAssistantFailureMessage(message.content)
+          )
+      ),
+    }))
+    .slice(-MAX_SESSIONS);
+}
+
+function isTransientAssistantFailureMessage(content: string): boolean {
+  const trimmed = content.trim();
+  return trimmed === '回复生成异常，请重试。' || trimmed === '';
+}
+
+function shouldPersistAssistantMessage(message: Message | null): message is Message {
+  if (!message) {
+    return false;
+  }
+
+  return !isTransientAssistantFailureMessage(message.content);
 }
 
 function resolveActiveSessionId(
@@ -356,7 +381,17 @@ export const useChatStore = create<ChatStore>()(
         }),
 
       startStreaming: (sessionId, requestId) =>
-        set({
+        set(state => ({
+          sessions: withUpdatedSession(state.sessions, sessionId, session => ({
+            ...session,
+            messages: session.messages.filter(
+              message =>
+                !(
+                  message.role === 'assistant' &&
+                  isTransientAssistantFailureMessage(message.content)
+                )
+            ),
+          })),
           streaming: true,
           error: null,
           tokPerSec: 0,
@@ -367,7 +402,7 @@ export const useChatStore = create<ChatStore>()(
           activeRequestId: requestId,
           draftAssistantMessage: null,
           draftSessionId: sessionId,
-        }),
+        })),
 
       setStreamingContent: (requestId, content) =>
         set(state => {
@@ -392,7 +427,7 @@ export const useChatStore = create<ChatStore>()(
 
           let sessions = state.sessions;
 
-          if (state.draftSessionId && state.draftAssistantMessage) {
+          if (state.draftSessionId && shouldPersistAssistantMessage(state.draftAssistantMessage)) {
             sessions = withUpdatedSession(state.sessions, state.draftSessionId, session => ({
               ...session,
               messages: [...session.messages, state.draftAssistantMessage as Message],
@@ -411,6 +446,7 @@ export const useChatStore = create<ChatStore>()(
             firstTokenLatencyMs: 0,
             promptTokenCount: 0,
             tokenCount: 0,
+            error: null,
           };
         }),
 
@@ -422,7 +458,7 @@ export const useChatStore = create<ChatStore>()(
 
           let sessions = state.sessions;
 
-          if (state.draftSessionId && state.draftAssistantMessage) {
+          if (state.draftSessionId && shouldPersistAssistantMessage(state.draftAssistantMessage)) {
             sessions = withUpdatedSession(state.sessions, state.draftSessionId, session => ({
               ...session,
               messages: [...session.messages, state.draftAssistantMessage as Message],

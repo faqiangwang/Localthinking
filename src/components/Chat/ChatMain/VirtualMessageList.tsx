@@ -120,7 +120,15 @@ export function VirtualMessageList({ messages, streaming, focusRequest }: Virtua
                 transform: `translateY(${virtualItem.start}px)`,
               }}
             >
-              <MessageBubble key={message._key} message={message} />
+              <MessageBubble
+                key={message._key}
+                message={message}
+                streaming={
+                  streaming &&
+                  virtualItem.index === displayMessages.length - 1 &&
+                  message.role === 'assistant'
+                }
+              />
             </div>
           );
         })}

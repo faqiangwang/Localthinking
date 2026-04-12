@@ -115,7 +115,7 @@ function isLikelyRawReasoningMessage(content: string) {
   return reasoningParts.length >= 2 && reasoningParts.length >= Math.ceil(sentenceLikeParts.length / 2);
 }
 
-function extractVisibleAssistantContent(content: string, streaming: boolean): string {
+function extractVisibleAssistantContent(content: string): string {
   const normalized = content.replace(/\r/g, '').trim();
   if (!normalized) {
     return '';
@@ -139,21 +139,11 @@ function extractVisibleAssistantContent(content: string, streaming: boolean): st
     normalized.startsWith('思考：') ||
     normalized.startsWith('思考:')
   ) {
-    return trimOrEmpty(
-      normalized
-        .replace(/<think>/gi, '')
-        .replace(/<\/think>/gi, '')
-        .replace(/<思考>/g, '')
-        .replace(/<\/思考>/g, '')
-        .replace(/<回答>/g, '')
-        .replace(/<\/回答>/g, '')
-        .replace(/^思考[：:]\s*/g, '')
-        .replace(/\n?回答[：:]\s*/g, '\n')
-    );
+    return '';
   }
 
   if (isLikelyRawReasoningMessage(normalized)) {
-    return streaming ? '' : '回复生成异常，请重试。';
+    return '';
   }
 
   const paragraphs = normalized
@@ -175,8 +165,8 @@ function sanitizeMessagesForInference(messages: Message[]): Message[] {
       return [message];
     }
 
-    const sanitizedContent = extractVisibleAssistantContent(message.content, false);
-    if (!sanitizedContent || sanitizedContent === '回复生成异常，请重试。') {
+    const sanitizedContent = extractVisibleAssistantContent(message.content);
+    if (!sanitizedContent) {
       return [];
     }
 
@@ -278,7 +268,7 @@ export function useChat(
       const rawContent = requestRawBuffersRef.current.get(requestId) ?? '';
       const content =
         rawContent.length > 0
-          ? extractVisibleAssistantContent(rawContent, false)
+          ? extractVisibleAssistantContent(rawContent)
           : requestBuffersRef.current.get(requestId);
       if (content !== undefined) {
         setStreamingContent(requestId, content);
@@ -326,7 +316,7 @@ export function useChat(
       requestRawBuffersRef.current.set(payload.request_id, nextRawContent);
       requestBuffersRef.current.set(
         payload.request_id,
-        extractVisibleAssistantContent(nextRawContent, true)
+        extractVisibleAssistantContent(nextRawContent)
       );
       setTokPerSec(payload.tok_per_sec || 0);
       setPromptTokPerSec(payload.prompt_tok_per_sec || 0);
@@ -342,10 +332,14 @@ export function useChat(
         return;
       }
 
+      requestRawBuffersRef.current.set(payload.request_id, '');
+      requestBuffersRef.current.set(payload.request_id, '');
+      clearScheduledUpdate(payload.request_id);
       setPromptTokenCount(payload.prompt_tokens || 0);
       setTokPerSec(0);
       setPromptTokPerSec(0);
       setFirstTokenLatencyMs(0);
+      setTokenCount(0);
     });
 
     const unDone = listen<ChatDoneEvent>('chat://done', event => {

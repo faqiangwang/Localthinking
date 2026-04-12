@@ -3,21 +3,21 @@ import { describe, expect, it } from 'vitest';
 import { MessageBubble } from '../components/MessageBubble';
 
 describe('MessageBubble reasoning fallback', () => {
-  it('将只有 think 内容的消息降级显示为普通回答', () => {
+  it('隐藏只有 think 内容且没有最终回答的消息', () => {
     render(<MessageBubble message={{ role: 'assistant', content: '<think>你好！</think>' }} />);
 
     expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
-    expect(screen.getByText('你好！')).toBeInTheDocument();
+    expect(screen.queryByText('你好！')).not.toBeInTheDocument();
   });
 
-  it('将未闭合 think 内容在结束后降级显示为普通回答', () => {
+  it('隐藏未闭合 think 内容', () => {
     render(<MessageBubble message={{ role: 'assistant', content: '<think>你好！我可以帮助你解答问题。' }} />);
 
     expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
-    expect(screen.getByText('你好！我可以帮助你解答问题。')).toBeInTheDocument();
+    expect(screen.queryByText('你好！我可以帮助你解答问题。')).not.toBeInTheDocument();
   });
 
-  it('流式阶段只有 think 内容时也直接显示可见回复', () => {
+  it('流式阶段只有 think 内容时也不显示内部思考', () => {
     render(
       <MessageBubble
         message={{ role: 'assistant', content: '<think>你好！我可以帮助你写作和解答问题。' }}
@@ -26,7 +26,7 @@ describe('MessageBubble reasoning fallback', () => {
     );
 
     expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
-    expect(screen.getByText('你好！我可以帮助你写作和解答问题。')).toBeInTheDocument();
+    expect(screen.queryByText('你好！我可以帮助你写作和解答问题。')).not.toBeInTheDocument();
   });
 
   it('完整的 think 加回答内容只显示最终回答', () => {
@@ -65,7 +65,7 @@ describe('MessageBubble reasoning fallback', () => {
     );
 
     expect(screen.queryByText(/用户又发来了/)).not.toBeInTheDocument();
-    expect(screen.getByText('回复生成异常，请重试。')).toBeInTheDocument();
+    expect(screen.queryByText('回复生成异常，请重试。')).not.toBeInTheDocument();
   });
 
   it('流式阶段不显示裸思维链内部独白', () => {
@@ -96,6 +96,6 @@ describe('MessageBubble reasoning fallback', () => {
     );
 
     expect(screen.queryByText(/现在我要分析用户的最新请求/)).not.toBeInTheDocument();
-    expect(screen.getByText('回复生成异常，请重试。')).toBeInTheDocument();
+    expect(screen.queryByText('回复生成异常，请重试。')).not.toBeInTheDocument();
   });
 });

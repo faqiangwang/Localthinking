@@ -3,8 +3,8 @@ use crate::api::ApiServerManager;
 use crate::backend::{InferenceBackend, Message};
 use crate::cache::{build_generation_cache_params_key, InferenceCache};
 use crate::chat::{
-    sanitize_assistant_message_content, sanitize_messages_for_inference, truncate_messages,
-    INVALID_ASSISTANT_RESPONSE_ERROR,
+    build_retry_messages, extract_visible_assistant_content, sanitize_assistant_message_content,
+    sanitize_messages_for_inference, truncate_messages, INVALID_ASSISTANT_RESPONSE_ERROR,
 };
 use crate::engine::{FlashAttentionMode, InferenceParams, LlamaCppEngine};
 use std::collections::HashSet;
@@ -75,6 +75,14 @@ struct PreparedChatRequest {
     prompt: String,
     effective_ctx_size: u32,
     inference_params: InferenceParams,
+}
+
+struct ChatAttemptResult {
+    content: String,
+    n_tokens: usize,
+    tok_per_sec: f64,
+    prompt_tok_per_sec: f64,
+    first_token_latency_ms: f64,
 }
 
 fn calculate_tok_per_sec(started_at: Instant, n_tokens: usize) -> f64 {
@@ -184,6 +192,101 @@ fn prepare_chat_request(
     }
 
     anyhow::bail!("上下文空间不足，自动裁剪历史消息后仍无法生成完整回复。")
+}
+
+async fn run_chat_attempt(
+    request_id: &str,
+    window: &Window,
+    engine_state: EngineState,
+    prepared_request: PreparedChatRequest,
+    emit_start: bool,
+) -> Result<ChatAttemptResult, String> {
+    let prompt_tokens = prepared_request.prompt_tokens;
+    let started_at = Instant::now();
+    let (tx, mut rx) = mpsc::channel::<String>(32);
+    let tx_clone = tx.clone();
+
+    if emit_start {
+        let _ = window.emit(
+            "chat://start",
+            &ChatStartEvent {
+                request_id: request_id.to_string(),
+                prompt_tokens,
+            },
+        );
+    }
+
+    let engine_for_task = engine_state;
+    let msgs = prepared_request.messages.clone();
+    let inference_params = prepared_request.inference_params.clone();
+    let effective_ctx_size = prepared_request.effective_ctx_size;
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut engine = engine_for_task.lock().unwrap_or_else(|p| p.into_inner());
+        engine.set_ctx_size(effective_ctx_size);
+        engine.generate_stream_with_params(msgs, inference_params, move |token: String| {
+            let _ = tx_clone.blocking_send(token);
+        })
+    });
+    drop(tx);
+
+    let mut token_count = 0usize;
+    let mut raw_content = String::new();
+    let mut visible_content = String::new();
+    let mut decode_started_at: Option<Instant> = None;
+    let mut first_token_latency_ms = 0.0;
+    let mut prompt_tok_per_sec = 0.0;
+
+    while let Some(token) = rx.recv().await {
+        if token.is_empty() {
+            continue;
+        }
+
+        if decode_started_at.is_none() {
+            let first_decode_at = Instant::now();
+            first_token_latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            prompt_tok_per_sec = calculate_tok_per_sec(started_at, prompt_tokens);
+            decode_started_at = Some(first_decode_at);
+        }
+
+        token_count += 1;
+        raw_content.push_str(&token);
+
+        let next_visible_content = extract_visible_assistant_content(&raw_content, true);
+        if let Some(delta) = next_visible_content.strip_prefix(&visible_content) {
+            if !delta.is_empty() {
+                let throughput_started_at = decode_started_at.unwrap_or(started_at);
+                let _ = window.emit(
+                    "chat://token",
+                    &ChatTokenEvent {
+                        request_id: request_id.to_string(),
+                        content: delta.to_string(),
+                        n_tokens: token_count,
+                        tok_per_sec: calculate_tok_per_sec(throughput_started_at, token_count),
+                        prompt_tokens,
+                        prompt_tok_per_sec,
+                        first_token_latency_ms,
+                    },
+                );
+            }
+            visible_content = next_visible_content;
+        }
+    }
+
+    match handle.await {
+        Ok(Ok(())) => Ok(ChatAttemptResult {
+            content: raw_content,
+            n_tokens: token_count,
+            tok_per_sec: calculate_tok_per_sec(
+                decode_started_at.unwrap_or(started_at),
+                token_count,
+            ),
+            prompt_tok_per_sec,
+            first_token_latency_ms,
+        }),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(error) => Err(format!("生成任务失败: {}", error)),
+    }
 }
 
 // 日志宏，避免生产环境中大量调试输出
@@ -333,26 +436,13 @@ pub async fn chat_stream(
         }
         None => return Err("生成请求准备失败".to_string()),
     };
+
     let prompt_tokens = prepared_request.prompt_tokens;
     let prompt = prepared_request.prompt.clone();
-
-    let started_at = Instant::now();
-    let (tx, mut rx) = mpsc::channel::<String>(32);
-    let tx_clone = tx.clone();
-
-    let engine_for_task = state.inner().clone();
-    let msgs = prepared_request.messages.clone();
-    let inference_params = prepared_request.inference_params.clone();
-    let effective_ctx_size = prepared_request.effective_ctx_size;
-    let cache_params =
-        build_generation_cache_params_key(&model_identity, effective_ctx_size, &inference_params);
-
-    let _ = window.emit(
-        "chat://start",
-        &ChatStartEvent {
-            request_id: request_id.clone(),
-            prompt_tokens,
-        },
+    let cache_params = build_generation_cache_params_key(
+        &model_identity,
+        prepared_request.effective_ctx_size,
+        &prepared_request.inference_params,
     );
 
     if let Some(cached) = cache.get(&prompt, &cache_params) {
@@ -394,53 +484,69 @@ pub async fn chat_stream(
         eprintln!("[缓存] 丢弃无效回复缓存并重新生成");
     }
 
-    let handle = tokio::task::spawn_blocking(move || {
-        let mut engine = engine_for_task.lock().unwrap_or_else(|p| p.into_inner());
-        engine.set_ctx_size(effective_ctx_size);
-        engine.generate_stream_with_params(msgs, inference_params, move |token: String| {
-            let _ = tx_clone.blocking_send(token);
-        })
-    });
-    drop(tx);
+    let mut attempt = run_chat_attempt(
+        &request_id,
+        &window,
+        state.inner().clone(),
+        prepared_request.clone(),
+        true,
+    )
+    .await;
+    let mut final_prompt = prompt;
+    let mut final_cache_params = cache_params;
+    let mut final_prompt_tokens = prompt_tokens;
 
-    let mut token_count = 0;
-    let mut content = String::new();
-    let mut decode_started_at: Option<Instant> = None;
-    let mut first_token_latency_ms = 0.0;
-    let mut prompt_tok_per_sec = 0.0;
+    let attempt = if let Ok(first_attempt) = &attempt {
+        if sanitize_assistant_message_content(&first_attempt.content).is_none() {
+            eprintln!("[推理] 首轮回复仍为内部推理文本，启动更严格的自动重试");
+            let retry_messages = build_retry_messages(&messages);
+            let retry_inference_params = InferenceParams {
+                temperature: prepared_request.inference_params.temperature.min(0.2),
+                top_p: prepared_request.inference_params.top_p.min(0.8),
+                top_k: prepared_request.inference_params.top_k,
+                max_tokens: prepared_request.inference_params.max_tokens,
+                repeat_penalty: prepared_request.inference_params.repeat_penalty,
+            };
+            let retry_prepared_request = {
+                let engine = state.lock().unwrap_or_else(|p| p.into_inner());
+                prepare_chat_request(
+                    &engine,
+                    &retry_messages,
+                    requested_ctx_size,
+                    &retry_inference_params,
+                )
+                .map_err(|error| error.to_string())
+            };
 
-    while let Some(token) = rx.recv().await {
-        if token.is_empty() {
-            continue;
+            match retry_prepared_request {
+                Ok(retry_prepared_request) => {
+                    final_prompt = retry_prepared_request.prompt.clone();
+                    final_cache_params = build_generation_cache_params_key(
+                        &model_identity,
+                        retry_prepared_request.effective_ctx_size,
+                        &retry_prepared_request.inference_params,
+                    );
+                    final_prompt_tokens = retry_prepared_request.prompt_tokens;
+                    attempt = run_chat_attempt(
+                        &request_id,
+                        &window,
+                        state.inner().clone(),
+                        retry_prepared_request,
+                        true,
+                    )
+                    .await;
+                }
+                Err(error) => attempt = Err(error),
+            }
         }
+        attempt
+    } else {
+        attempt
+    };
 
-        if decode_started_at.is_none() {
-            let first_decode_at = Instant::now();
-            first_token_latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-            prompt_tok_per_sec = calculate_tok_per_sec(started_at, prompt_tokens);
-            decode_started_at = Some(first_decode_at);
-        }
-
-        token_count += 1;
-        content.push_str(&token);
-        let throughput_started_at = decode_started_at.unwrap_or(started_at);
-        let _ = window.emit(
-            "chat://token",
-            &ChatTokenEvent {
-                request_id: request_id.clone(),
-                content: token,
-                n_tokens: token_count,
-                tok_per_sec: calculate_tok_per_sec(throughput_started_at, token_count),
-                prompt_tokens,
-                prompt_tok_per_sec,
-                first_token_latency_ms,
-            },
-        );
-    }
-
-    match handle.await {
-        Ok(Ok(())) => {
-            let sanitized_content = match sanitize_assistant_message_content(&content) {
+    match attempt {
+        Ok(attempt) => {
+            let sanitized_content = match sanitize_assistant_message_content(&attempt.content) {
                 Some(content) => content,
                 None => {
                     let message = INVALID_ASSISTANT_RESPONSE_ERROR.to_string();
@@ -449,14 +555,11 @@ pub async fn chat_stream(
                         &ChatErrorEvent {
                             request_id,
                             error: message.clone(),
-                            n_tokens: token_count,
-                            tok_per_sec: calculate_tok_per_sec(
-                                decode_started_at.unwrap_or(started_at),
-                                token_count,
-                            ),
-                            prompt_tokens,
-                            prompt_tok_per_sec,
-                            first_token_latency_ms,
+                            n_tokens: attempt.n_tokens,
+                            tok_per_sec: attempt.tok_per_sec,
+                            prompt_tokens: final_prompt_tokens,
+                            prompt_tok_per_sec: attempt.prompt_tok_per_sec,
+                            first_token_latency_ms: attempt.first_token_latency_ms,
                         },
                     );
                     return Err(message);
@@ -464,59 +567,42 @@ pub async fn chat_stream(
             };
 
             if !sanitized_content.is_empty() {
-                cache.set(&prompt, &cache_params, &sanitized_content, token_count);
+                cache.set(
+                    &final_prompt,
+                    &final_cache_params,
+                    &sanitized_content,
+                    attempt.n_tokens,
+                );
             }
+
             let _ = window.emit(
                 "chat://done",
                 &ChatDoneEvent {
                     request_id,
-                    n_tokens: token_count,
-                    tok_per_sec: calculate_tok_per_sec(
-                        decode_started_at.unwrap_or(started_at),
-                        token_count,
-                    ),
-                    prompt_tokens,
-                    prompt_tok_per_sec,
-                    first_token_latency_ms,
+                    n_tokens: attempt.n_tokens,
+                    tok_per_sec: attempt.tok_per_sec,
+                    prompt_tokens: final_prompt_tokens,
+                    prompt_tok_per_sec: attempt.prompt_tok_per_sec,
+                    first_token_latency_ms: attempt.first_token_latency_ms,
                 },
             );
-            eprintln!("[INFO] chat_stream 完成，共发送 {} tokens", token_count);
+            eprintln!(
+                "[INFO] chat_stream 完成，共发送 {} tokens",
+                attempt.n_tokens
+            );
             Ok(())
         }
-        Ok(Err(error)) => {
-            let message = error.to_string();
+        Err(message) => {
             let _ = window.emit(
                 "chat://error",
                 &ChatErrorEvent {
                     request_id,
                     error: message.clone(),
-                    n_tokens: token_count,
-                    tok_per_sec: calculate_tok_per_sec(
-                        decode_started_at.unwrap_or(started_at),
-                        token_count,
-                    ),
-                    prompt_tokens,
-                    prompt_tok_per_sec,
-                    first_token_latency_ms,
-                },
-            );
-            Err(message)
-        }
-        Err(error) => {
-            let message = format!("生成任务失败: {}", error);
-            let _ = window.emit(
-                "chat://error",
-                &ChatErrorEvent {
-                    request_id,
-                    error: message.clone(),
-                    n_tokens: token_count,
-                    tok_per_sec: calculate_tok_per_sec(
-                        decode_started_at.unwrap_or(started_at),
-                        token_count,
-                    ),
-                    prompt_tokens,
-                    prompt_tok_per_sec,
-                    first_token_latency_ms,
+                    n_tokens: 0,
+                    tok_per_sec: 0.0,
+                    prompt_tokens: final_prompt_tokens,
+                    prompt_tok_per_sec: 0.0,
+                    first_token_latency_ms: 0.0,
                 },
             );
             Err(message)

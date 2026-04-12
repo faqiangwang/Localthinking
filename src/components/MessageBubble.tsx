@@ -82,22 +82,6 @@ function trimOrNull(value: string | null | undefined) {
   return trimmed ? trimmed : null;
 }
 
-function fallbackAnswerFromThinkingOnlyContent(content: string, thinking: string | null) {
-  const stripped = trimOrNull(
-    content
-      .replace(/<think>/gi, '')
-      .replace(/<\/think>/gi, '')
-      .replace(/<思考>/g, '')
-      .replace(/<\/思考>/g, '')
-      .replace(/<回答>/g, '')
-      .replace(/<\/回答>/g, '')
-      .replace(/^思考[：:]\s*/g, '')
-      .replace(/\n?回答[：:]\s*/g, '\n')
-  );
-
-  return stripped || thinking || '';
-}
-
 function resolveThinkingPattern(content: string) {
   return (
     THINKING_BLOCK_PATTERNS.find(candidate => content.match(candidate.thinking)) ||
@@ -157,14 +141,14 @@ function isLikelyRawReasoningMessage(content: string) {
   return reasoningParts.length >= 2 && reasoningParts.length >= Math.ceil(sentenceLikeParts.length / 2);
 }
 
-function sanitizeRawReasoningContent(content: string, streaming: boolean) {
+function sanitizeRawReasoningContent(content: string) {
   const normalized = content.replace(/\r/g, '').trim();
   if (!normalized) {
     return null;
   }
 
   if (isLikelyRawReasoningMessage(normalized)) {
-    return streaming ? '' : '回复生成异常，请重试。';
+    return '';
   }
 
   const paragraphs = normalized
@@ -186,7 +170,7 @@ function sanitizeRawReasoningContent(content: string, streaming: boolean) {
     return visibleParagraphs.join('\n\n');
   }
 
-  return streaming ? '' : '回复生成异常，请重试。';
+  return '';
 }
 
 // 解析思考过程和回答
@@ -217,7 +201,7 @@ function parseContent(content: string, hasPartialThinking: boolean, hasPartialAn
     if (!answer && thinking) {
       return {
         thinking: null,
-        answer: fallbackAnswerFromThinkingOnlyContent(content, thinking),
+        answer: '',
       };
     }
   } else if (pattern) {
@@ -228,11 +212,11 @@ function parseContent(content: string, hasPartialThinking: boolean, hasPartialAn
     if (!answer && thinking) {
       return {
         thinking: null,
-        answer: fallbackAnswerFromThinkingOnlyContent(content, thinking),
+        answer: '',
       };
     }
   } else {
-    const sanitized = sanitizeRawReasoningContent(content, false);
+    const sanitized = sanitizeRawReasoningContent(content);
     if (sanitized !== null) {
       answer = sanitized;
     }
@@ -276,16 +260,12 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
     lowerContent.includes('</think>');
 
   // 解析内容（传入 hasPartialThinking 和 hasPartialAnswer 以正确处理流式输出）
-  const { thinking, answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);
-  const shouldFallbackThinkingOnlyAnswer =
-    !isUser && !answer && (thinking || hasPartialThinking);
+  const { answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);
   const rawReasoningFallback = !isUser && !hasExplicitThinkingPattern
-    ? sanitizeRawReasoningContent(message.content, Boolean(streaming))
+    ? sanitizeRawReasoningContent(message.content)
     : null;
   const displayAnswer = rawReasoningFallback !== null
     ? rawReasoningFallback
-    : shouldFallbackThinkingOnlyAnswer
-    ? fallbackAnswerFromThinkingOnlyContent(message.content, thinking)
     : answer;
 
   return (

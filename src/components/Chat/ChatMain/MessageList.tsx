@@ -89,7 +89,10 @@ export function MessageList({ messages, streaming, focusRequest }: MessageListPr
     <div className={styles.messageList} ref={containerRef}>
       {displayMessages.map((msg, index) => (
         <div key={msg._key} data-message-index={index}>
-          <MessageBubble message={msg} />
+          <MessageBubble
+            message={msg}
+            streaming={streaming && index === displayMessages.length - 1 && msg.role === 'assistant'}
+          />
         </div>
       ))}
 

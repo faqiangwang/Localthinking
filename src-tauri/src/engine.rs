@@ -770,9 +770,12 @@ mod imp {
                 sampler.accept(*token);
             }
 
+            const MAX_CONSECUTIVE_EMPTY_PIECES: usize = 16;
+
             let mut n_cur = 0usize;
             let mut last_position = (tokens.len() - 1) as i32;
             let mut logits_idx = resolve_prefill_logits_index(tokens.len(), tuning.n_batch);
+            let mut consecutive_empty_pieces = 0usize;
 
             loop {
                 if n_cur >= max_tokens {
@@ -799,11 +802,22 @@ mod imp {
                 match model.token_to_piece(token_to_generate, &mut decoder, false, None) {
                     Ok(token_str) => {
                         if token_str.is_empty() {
-                            eprintln!("[推理] 收到空字符串，结束");
-                            break;
+                            consecutive_empty_pieces += 1;
+                            eprintln!(
+                                "[推理] 收到空字符串 token，跳过并继续生成 (count={}, token_id={})",
+                                consecutive_empty_pieces, token_to_generate
+                            );
+                            if consecutive_empty_pieces >= MAX_CONSECUTIVE_EMPTY_PIECES {
+                                eprintln!(
+                                    "[推理] 连续收到过多空字符串 token，结束生成以避免死循环"
+                                );
+                                break;
+                            }
+                        } else {
+                            consecutive_empty_pieces = 0;
+                            eprintln!("[推理] 发送 token: {:?}", token_str);
+                            on_token(token_str);
                         }
-                        eprintln!("[推理] 发送 token: {:?}", token_str);
-                        on_token(token_str);
                     }
                     Err(e) => {
                         eprintln!("[推理] token_to_piece 失败: {}", e);

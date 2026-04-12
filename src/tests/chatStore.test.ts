@@ -99,4 +99,39 @@ describe('chatStore streaming requests', () => {
     expect(state.draftAssistantMessage).toBeNull();
     expect(state.draftSessionId).toBeNull();
   });
+
+  it('完成时会清空错误且忽略空 assistant 草稿', () => {
+    const store = useChatStore.getState();
+    const sessionId = store.createSession('system prompt');
+
+    store.addMessage(sessionId, { role: 'user', content: 'question' });
+    store.startStreaming(sessionId, 'req-1');
+    store.setStreamingContent('req-1', '');
+    useChatStore.setState({ error: 'old error' });
+
+    useChatStore.getState().finishStreaming('req-1');
+
+    const state = useChatStore.getState();
+    const session = state.sessions.find(current => current.id === sessionId);
+
+    expect(state.error).toBeNull();
+    expect(session?.messages.some(message => message.role === 'assistant')).toBe(false);
+  });
+
+  it('失败时不会把瞬时失败占位写入会话', () => {
+    const store = useChatStore.getState();
+    const sessionId = store.createSession('system prompt');
+
+    store.addMessage(sessionId, { role: 'user', content: 'question' });
+    store.startStreaming(sessionId, 'req-1');
+    store.setStreamingContent('req-1', '回复生成异常，请重试。');
+
+    useChatStore.getState().failStreaming('req-1', 'backend error');
+
+    const state = useChatStore.getState();
+    const session = state.sessions.find(current => current.id === sessionId);
+
+    expect(state.error).toBe('backend error');
+    expect(session?.messages.some(message => message.role === 'assistant')).toBe(false);
+  });
 });
