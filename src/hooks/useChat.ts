@@ -45,7 +45,6 @@ export function useChat(
     tokenCount,
     draftAssistantMessage,
     draftSessionId,
-    ensureRuntimeInitialized,
     createSession: createStoreSession,
     ensureSession,
     switchSession,
@@ -140,10 +139,6 @@ export function useChat(
   }, [syncSystemPrompt, systemPrompt, activeSessionId]);
 
   useEffect(() => {
-    if (!ensureRuntimeInitialized()) {
-      return;
-    }
-
     const updateTimers = updateTimersRef.current;
     const requestBuffers = requestBuffersRef.current;
     const requestStartedAt = requestStartedAtRef.current;
@@ -223,7 +218,6 @@ export function useChat(
     };
   }, [
     clearRequestTracking,
-    ensureRuntimeInitialized,
     failStreaming,
     finishStreaming,
     flushRequestContent,

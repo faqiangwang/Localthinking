@@ -46,7 +46,6 @@ export function useModel() {
     upsertCustomModel,
     mergeCustomModels,
     removeCustomModel,
-    ensureRuntimeInitialized,
   } = useModelStore();
 
   const refreshSystemInfo = useCallback(async (): Promise<SystemInfo | null> => {
@@ -130,10 +129,6 @@ export function useModel() {
   );
 
   useEffect(() => {
-    if (!ensureRuntimeInitialized()) {
-      return;
-    }
-
     let cancelled = false;
 
     const initialize = async () => {
@@ -150,7 +145,7 @@ export function useModel() {
     return () => {
       cancelled = true;
     };
-  }, [customModels, ensureRuntimeInitialized, lastModelPath, loadModel, refreshSystemInfo]);
+  }, [customModels, lastModelPath, loadModel, refreshSystemInfo]);
 
   return {
     modelLoaded,

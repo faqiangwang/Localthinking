@@ -24,9 +24,7 @@ interface ChatStore extends PersistedChatState {
   activeRequestId: string | null;
   draftAssistantMessage: Message | null;
   draftSessionId: string | null;
-  runtimeInitialized: boolean;
 
-  ensureRuntimeInitialized: () => boolean;
   createSession: (systemPrompt: string) => string;
   ensureSession: (systemPrompt: string) => string;
   switchSession: (sessionId: string) => void;
@@ -163,16 +161,6 @@ export const useChatStore = create<ChatStore>()(
       activeRequestId: null,
       draftAssistantMessage: null,
       draftSessionId: null,
-      runtimeInitialized: false,
-
-      ensureRuntimeInitialized: () => {
-        if (get().runtimeInitialized) {
-          return false;
-        }
-
-        set({ runtimeInitialized: true });
-        return true;
-      },
 
       createSession: systemPrompt => {
         const newSession: ChatSession = {

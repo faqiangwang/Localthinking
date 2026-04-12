@@ -24,7 +24,6 @@ interface ModelStore extends PersistedModelState {
   systemInfo: SystemInfo | null;
   loading: boolean;
   error: string | null;
-  runtimeInitialized: boolean;
 
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -35,7 +34,6 @@ interface ModelStore extends PersistedModelState {
   upsertCustomModel: (model: LocalModelEntry) => void;
   mergeCustomModels: (models: LocalModelEntry[]) => number;
   removeCustomModel: (path: string) => void;
-  ensureRuntimeInitialized: () => boolean;
 }
 
 function normalizeCustomModels(value: unknown): LocalModelEntry[] {
@@ -137,7 +135,6 @@ export const useModelStore = create<ModelStore>()(
       error: null,
       customModels: [],
       lastModelPath: null,
-      runtimeInitialized: false,
 
       setLoading: (loading) => set({ loading }),
       setError: (error) => set({ error }),
@@ -171,14 +168,6 @@ export const useModelStore = create<ModelStore>()(
           customModels: state.customModels.filter((model) => model.path !== path),
           lastModelPath: state.lastModelPath === path ? null : state.lastModelPath,
         })),
-      ensureRuntimeInitialized: () => {
-        if (get().runtimeInitialized) {
-          return false;
-        }
-
-        set({ runtimeInitialized: true });
-        return true;
-      },
     }),
     {
       name: STORAGE_KEYS.MODEL_STORE,

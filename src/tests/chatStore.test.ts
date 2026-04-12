@@ -16,7 +16,6 @@ function resetChatStore() {
     activeRequestId: null,
     draftAssistantMessage: null,
     draftSessionId: null,
-    runtimeInitialized: false,
   });
 }
 
