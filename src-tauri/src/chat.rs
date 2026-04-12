@@ -32,14 +32,30 @@ pub fn estimate_tokens(text: &str) -> usize {
 }
 
 /// 智能截断对话历史，确保不超过最大 token 限制
-/// 保留最近的消息，丢弃最旧的消息
+/// 保留 system 指令和最近的消息，丢弃最旧的非 system 消息
 #[allow(dead_code)]
 pub fn truncate_messages(messages: &[Message], max_tokens: usize) -> Vec<Message> {
-    let mut result = Vec::new();
-    let mut current_tokens = 0;
+    if messages.is_empty() {
+        return Vec::new();
+    }
 
-    // 从最新消息开始倒序遍历
+    let system_messages: Vec<Message> = messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .cloned()
+        .collect();
+    let mut result = Vec::new();
+    let mut current_tokens: usize = system_messages
+        .iter()
+        .map(|message| estimate_tokens(&message.content).max(1))
+        .sum();
+
+    // 从最新消息开始倒序遍历，优先保留最近的对话
     for msg in messages.iter().rev() {
+        if msg.role == "system" {
+            continue;
+        }
+
         let msg_tokens = estimate_tokens(&msg.content);
 
         // 如果加上这条消息会超出限制，且已经有消息了，就停止
@@ -53,7 +69,17 @@ pub fn truncate_messages(messages: &[Message], max_tokens: usize) -> Vec<Message
 
     // 反转回正确顺序（最旧的消息在前）
     result.reverse();
-    result
+
+    let mut combined = system_messages;
+    combined.extend(result);
+
+    if combined.is_empty() {
+        if let Some(last_message) = messages.last() {
+            combined.push(last_message.clone());
+        }
+    }
+
+    combined
 }
 
 /// 根据对话历史动态计算推荐的上下文大小

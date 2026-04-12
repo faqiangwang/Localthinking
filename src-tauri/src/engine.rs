@@ -64,6 +64,7 @@ impl FlashAttentionMode {
 mod imp {
     use super::*;
     use encoding_rs::UTF_8;
+    use llama_cpp_2::DecodeError;
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::gguf::GgufContext;
     use llama_cpp_2::llama_backend::LlamaBackend;
@@ -425,6 +426,10 @@ mod imp {
         );
     }
 
+    pub(crate) fn resolve_generation_capacity(ctx_size: u32, prompt_token_count: usize) -> usize {
+        ctx_size.saturating_sub(prompt_token_count as u32) as usize
+    }
+
     fn build_model_params(
         configured_gpu_layers: Option<u32>,
         use_cpu_moe_override: bool,
@@ -710,7 +715,21 @@ mod imp {
 
             let mut sampler = build_sampler(&params);
             let abort = self.abort_flag.clone();
-            let max_tokens = params.max_tokens.max(1) as usize;
+            let requested_max_tokens = params.max_tokens.max(1) as usize;
+            let max_generation_tokens = resolve_generation_capacity(runtime_ctx_size, tokens.len());
+            if max_generation_tokens == 0 {
+                return Err(anyhow::anyhow!(
+                    "上下文空间不足，当前提示词已占满上下文，无法继续生成回复。"
+                ));
+            }
+            let max_tokens = requested_max_tokens.min(max_generation_tokens);
+
+            if max_tokens < requested_max_tokens {
+                eprintln!(
+                    "[推理] 根据 KV 容量收缩生成上限: requested_max_tokens={}, effective_max_tokens={}, prompt_tokens={}, ctx={}",
+                    requested_max_tokens, max_tokens, tokens.len(), runtime_ctx_size
+                );
+            }
 
             {
                 eprintln!("[推理] 开始分块解码提示词...");
@@ -740,7 +759,7 @@ mod imp {
 
             let mut n_cur = 0usize;
             let mut last_position = (tokens.len() - 1) as i32;
-            let mut logits_idx = last_position;
+            let mut logits_idx = resolve_prefill_logits_index(tokens.len(), tuning.n_batch);
 
             loop {
                 if n_cur >= max_tokens {
@@ -775,7 +794,7 @@ mod imp {
                     }
                     Err(e) => {
                         eprintln!("[推理] token_to_piece 失败: {}", e);
-                        break;
+                        return Err(anyhow::anyhow!("token_to_piece 失败: {}", e));
                     }
                 }
 
@@ -791,7 +810,16 @@ mod imp {
 
                 if let Err(e) = ctx.decode(&mut batch) {
                     eprintln!("[推理] decode 返回错误: {:?}", e);
-                    break;
+                    match e {
+                        DecodeError::NoKvCacheSlot => {
+                            return Err(anyhow::anyhow!(
+                                "上下文空间不足，回复已被截断。请缩短历史消息、增大上下文，或新建对话后重试。"
+                            ));
+                        }
+                        other => {
+                            return Err(anyhow::anyhow!("生成解码失败: {}", other));
+                        }
+                    }
                 }
 
                 last_position = batch_pos;
@@ -968,6 +996,12 @@ mod imp {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.subsec_nanos())
             .unwrap_or(0)
+    }
+
+    pub(crate) fn resolve_prefill_logits_index(prompt_token_count: usize, batch_size: u32) -> i32 {
+        let prompt_token_count = prompt_token_count.max(1);
+        let batch_size = batch_size.max(1) as usize;
+        ((prompt_token_count - 1) % batch_size) as i32
     }
 }
 
@@ -1165,6 +1199,7 @@ pub use imp::LlamaCppEngine;
 mod tuning_tests {
     use super::imp::{
         resolve_context_tuning_with_memory, resolve_effective_ctx_size_with_memory,
+        resolve_generation_capacity, resolve_prefill_logits_index,
     };
 
     #[test]
@@ -1206,6 +1241,21 @@ mod tuning_tests {
         let effective_ctx = resolve_effective_ctx_size_with_memory(4096, 256, true, Some(3.5));
 
         assert_eq!(effective_ctx, 1024);
+    }
+
+    #[test]
+    fn resolve_prefill_logits_index_uses_single_output_slot() {
+        assert_eq!(resolve_prefill_logits_index(1, 256), 0);
+        assert_eq!(resolve_prefill_logits_index(256, 256), 255);
+        assert_eq!(resolve_prefill_logits_index(257, 256), 0);
+        assert_eq!(resolve_prefill_logits_index(917, 256), 148);
+    }
+
+    #[test]
+    fn resolve_generation_capacity_matches_remaining_kv_space() {
+        assert_eq!(resolve_generation_capacity(1024, 922), 102);
+        assert_eq!(resolve_generation_capacity(2048, 0), 2048);
+        assert_eq!(resolve_generation_capacity(512, 800), 0);
     }
 }
 

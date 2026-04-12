@@ -2,6 +2,7 @@
 use crate::api::ApiServerManager;
 use crate::backend::{InferenceBackend, Message};
 use crate::cache::{build_generation_cache_params_key, InferenceCache};
+use crate::chat::truncate_messages;
 use crate::engine::{FlashAttentionMode, InferenceParams, LlamaCppEngine};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -59,6 +60,20 @@ struct ChatErrorEvent {
     first_token_latency_ms: f64,
 }
 
+const CONTEXT_MARGIN_TOKENS: usize = 32;
+const TARGET_GENERATION_HEADROOM_TOKENS: usize = 256;
+const MIN_GENERATION_HEADROOM_TOKENS: usize = 64;
+const MAX_HISTORY_TRUNCATION_PASSES: usize = 6;
+
+#[derive(Clone)]
+struct PreparedChatRequest {
+    messages: Vec<Message>,
+    prompt_tokens: usize,
+    prompt: String,
+    effective_ctx_size: u32,
+    inference_params: InferenceParams,
+}
+
 fn calculate_tok_per_sec(started_at: Instant, n_tokens: usize) -> f64 {
     let elapsed = started_at.elapsed().as_secs_f64();
     if elapsed > f64::EPSILON {
@@ -89,6 +104,80 @@ fn sanitize_chat_generation_params(params: ChatGenerationParams) -> (InferencePa
         },
         ctx_size,
     )
+}
+
+fn resolve_target_generation_headroom(max_tokens: i32) -> usize {
+    (max_tokens.max(1) as usize)
+        .min(TARGET_GENERATION_HEADROOM_TOKENS)
+        .max(MIN_GENERATION_HEADROOM_TOKENS)
+}
+
+fn resolve_min_generation_headroom(max_tokens: i32) -> usize {
+    (max_tokens.max(1) as usize)
+        .min(MIN_GENERATION_HEADROOM_TOKENS)
+        .max(16)
+}
+
+fn prepare_chat_request(
+    engine: &LlamaCppEngine,
+    messages: &[Message],
+    requested_ctx_size: u32,
+    inference_params: &InferenceParams,
+) -> anyhow::Result<PreparedChatRequest> {
+    let mut prepared_messages = messages.to_vec();
+    let target_headroom = resolve_target_generation_headroom(inference_params.max_tokens);
+    let min_headroom = resolve_min_generation_headroom(inference_params.max_tokens);
+    let mut history_trimmed = false;
+
+    for _ in 0..MAX_HISTORY_TRUNCATION_PASSES {
+        let prompt_tokens = engine.count_prompt_tokens(&prepared_messages)?;
+        let prompt = engine.render_prompt(&prepared_messages)?;
+        let requested_with_headroom = requested_ctx_size.max(
+            (prompt_tokens + target_headroom + CONTEXT_MARGIN_TOKENS).min(u32::MAX as usize) as u32,
+        );
+        let effective_ctx_size =
+            engine.resolve_runtime_ctx_size(requested_with_headroom, prompt_tokens);
+        let available_generation_tokens = effective_ctx_size
+            .saturating_sub(prompt_tokens as u32)
+            .saturating_sub(CONTEXT_MARGIN_TOKENS as u32) as usize;
+
+        if available_generation_tokens >= min_headroom {
+            let mut adjusted_params = inference_params.clone();
+            adjusted_params.max_tokens =
+                adjusted_params.max_tokens.min(available_generation_tokens as i32).max(1);
+
+            if history_trimmed {
+                eprintln!(
+                    "[上下文] 已自动截断历史消息: prompt_tokens={}, ctx={}, generation_budget={}",
+                    prompt_tokens, effective_ctx_size, available_generation_tokens
+                );
+            }
+
+            return Ok(PreparedChatRequest {
+                messages: prepared_messages,
+                prompt_tokens,
+                prompt,
+                effective_ctx_size,
+                inference_params: adjusted_params,
+            });
+        }
+
+        let history_budget = effective_ctx_size
+            .saturating_sub((target_headroom + CONTEXT_MARGIN_TOKENS) as u32)
+            as usize;
+        let next_messages = truncate_messages(&prepared_messages, history_budget.max(1));
+
+        if next_messages.len() >= prepared_messages.len() {
+            anyhow::bail!(
+                "上下文空间不足，无法为回复预留足够空间。请缩短当前消息、减少历史消息，或增大上下文大小。"
+            );
+        }
+
+        prepared_messages = next_messages;
+        history_trimmed = true;
+    }
+
+    anyhow::bail!("上下文空间不足，自动裁剪历史消息后仍无法生成完整回复。")
 }
 
 // 日志宏，避免生产环境中大量调试输出
@@ -178,18 +267,26 @@ pub async fn chat_stream(
     cache: State<'_, InferenceCache>,
 ) -> Result<(), String> {
     eprintln!("[INFO] chat_stream 开始，收到 {} 条消息", messages.len());
+    let (inference_params, requested_ctx_size) = sanitize_chat_generation_params(params);
 
     // 检查模型是否已加载
-    let (loaded, model_identity, prompt_tokens, prompt) = {
+    let (loaded, model_identity, prepared_request) = {
         let engine = state.lock().unwrap_or_else(|p| p.into_inner());
+        let prepared_request = if engine.is_model_loaded() {
+            Some(
+                prepare_chat_request(&engine, &messages, requested_ctx_size, &inference_params)
+                    .map_err(|error| error.to_string()),
+            )
+        } else {
+            None
+        };
         (
             engine.is_model_loaded(),
             engine
                 .model_path
                 .clone()
                 .unwrap_or_else(|| engine.model_name.clone()),
-            engine.count_prompt_tokens(&messages).unwrap_or(0),
-            engine.render_prompt(&messages).unwrap_or_default(),
+            prepared_request,
         )
     };
 
@@ -210,17 +307,36 @@ pub async fn chat_stream(
         return Err(msg);
     }
 
+    let prepared_request = match prepared_request {
+        Some(Ok(prepared_request)) => prepared_request,
+        Some(Err(message)) => {
+            let _ = window.emit(
+                "chat://error",
+                &ChatErrorEvent {
+                    request_id,
+                    error: message.clone(),
+                    n_tokens: 0,
+                    tok_per_sec: 0.0,
+                    prompt_tokens: 0,
+                    prompt_tok_per_sec: 0.0,
+                    first_token_latency_ms: 0.0,
+                },
+            );
+            return Err(message);
+        }
+        None => return Err("生成请求准备失败".to_string()),
+    };
+    let prompt_tokens = prepared_request.prompt_tokens;
+    let prompt = prepared_request.prompt.clone();
+
     let started_at = Instant::now();
     let (tx, mut rx) = mpsc::channel::<String>(32);
     let tx_clone = tx.clone();
 
     let engine_for_task = state.inner().clone();
-    let msgs = messages.clone();
-    let (inference_params, requested_ctx_size) = sanitize_chat_generation_params(params);
-    let effective_ctx_size = {
-        let engine = state.lock().unwrap_or_else(|p| p.into_inner());
-        engine.resolve_runtime_ctx_size(requested_ctx_size, prompt_tokens)
-    };
+    let msgs = prepared_request.messages.clone();
+    let inference_params = prepared_request.inference_params.clone();
+    let effective_ctx_size = prepared_request.effective_ctx_size;
     let cache_params =
         build_generation_cache_params_key(&model_identity, effective_ctx_size, &inference_params);
 
@@ -366,6 +482,29 @@ pub async fn chat_stream(
             );
             Err(message)
         }
+    }
+}
+
+#[cfg(test)]
+mod planning_tests {
+    use super::{
+        resolve_min_generation_headroom, resolve_target_generation_headroom,
+        CONTEXT_MARGIN_TOKENS,
+    };
+
+    #[test]
+    fn generation_headroom_reserves_meaningful_budget() {
+        assert_eq!(resolve_target_generation_headroom(16), 64);
+        assert_eq!(resolve_target_generation_headroom(128), 128);
+        assert_eq!(resolve_target_generation_headroom(2048), 256);
+    }
+
+    #[test]
+    fn min_generation_headroom_stays_bounded() {
+        assert_eq!(resolve_min_generation_headroom(1), 16);
+        assert_eq!(resolve_min_generation_headroom(32), 32);
+        assert_eq!(resolve_min_generation_headroom(512), 64);
+        assert_eq!(CONTEXT_MARGIN_TOKENS, 32);
     }
 }
 

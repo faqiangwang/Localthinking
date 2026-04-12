@@ -3,7 +3,7 @@
 
 use crate::backend::Message;
 use crate::cache::{build_generation_cache_params_key, InferenceCache};
-use crate::chat::build_prompt;
+use crate::chat::truncate_messages;
 use crate::engine::{InferenceParams, LlamaCppEngine};
 use axum::{
     extract::State,
@@ -24,11 +24,24 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 
 /// API 最大生成长度限制
 const MAX_TOKENS_LIMIT: u32 = 256;
+const API_CONTEXT_MARGIN_TOKENS: usize = 32;
+const API_TARGET_GENERATION_HEADROOM_TOKENS: usize = 256;
+const API_MIN_GENERATION_HEADROOM_TOKENS: usize = 64;
+const API_MAX_HISTORY_TRUNCATION_PASSES: usize = 6;
 
 #[derive(Clone)]
 pub struct ApiState {
     pub engine: Arc<Mutex<LlamaCppEngine>>,
     pub cache: InferenceCache,
+}
+
+#[derive(Clone)]
+struct PreparedApiChatRequest {
+    messages: Vec<Message>,
+    prompt: String,
+    prompt_tokens: usize,
+    effective_ctx_size: u32,
+    inference_params: InferenceParams,
 }
 
 impl ApiState {
@@ -415,6 +428,72 @@ fn normalize_stop_sequences(stop: Option<&[String]>) -> Vec<String> {
         .collect()
 }
 
+fn resolve_api_target_generation_headroom(max_tokens: i32) -> usize {
+    (max_tokens.max(1) as usize)
+        .min(API_TARGET_GENERATION_HEADROOM_TOKENS)
+        .max(API_MIN_GENERATION_HEADROOM_TOKENS)
+}
+
+fn resolve_api_min_generation_headroom(max_tokens: i32) -> usize {
+    (max_tokens.max(1) as usize)
+        .min(API_MIN_GENERATION_HEADROOM_TOKENS)
+        .max(16)
+}
+
+fn prepare_api_chat_request(
+    engine: &LlamaCppEngine,
+    messages: &[Message],
+    requested_ctx_size: u32,
+    inference_params: &InferenceParams,
+) -> anyhow::Result<PreparedApiChatRequest> {
+    let mut prepared_messages = messages.to_vec();
+    let target_headroom = resolve_api_target_generation_headroom(inference_params.max_tokens);
+    let min_headroom = resolve_api_min_generation_headroom(inference_params.max_tokens);
+
+    for _ in 0..API_MAX_HISTORY_TRUNCATION_PASSES {
+        let prompt_tokens = engine.count_prompt_tokens(&prepared_messages)?;
+        let prompt = engine.render_prompt(&prepared_messages)?;
+        let requested_with_headroom = requested_ctx_size.max(
+            (prompt_tokens + target_headroom + API_CONTEXT_MARGIN_TOKENS).min(u32::MAX as usize)
+                as u32,
+        );
+        let effective_ctx_size =
+            engine.resolve_runtime_ctx_size(requested_with_headroom, prompt_tokens);
+        let available_generation_tokens = effective_ctx_size
+            .saturating_sub(prompt_tokens as u32)
+            .saturating_sub(API_CONTEXT_MARGIN_TOKENS as u32) as usize;
+
+        if available_generation_tokens >= min_headroom {
+            let mut adjusted_params = inference_params.clone();
+            adjusted_params.max_tokens =
+                adjusted_params.max_tokens.min(available_generation_tokens as i32).max(1);
+
+            return Ok(PreparedApiChatRequest {
+                messages: prepared_messages,
+                prompt,
+                prompt_tokens,
+                effective_ctx_size,
+                inference_params: adjusted_params,
+            });
+        }
+
+        let history_budget = effective_ctx_size
+            .saturating_sub((target_headroom + API_CONTEXT_MARGIN_TOKENS) as u32)
+            as usize;
+        let next_messages = truncate_messages(&prepared_messages, history_budget.max(1));
+
+        if next_messages.len() >= prepared_messages.len() {
+            anyhow::bail!(
+                "上下文空间不足，无法为回复预留足够空间。请缩短历史消息、增大上下文，或新建对话后重试。"
+            );
+        }
+
+        prepared_messages = next_messages;
+    }
+
+    anyhow::bail!("上下文空间不足，自动裁剪历史消息后仍无法完成请求。")
+}
+
 fn finalize_completion(
     mut content: String,
     stop_sequences: &[String],
@@ -466,7 +545,7 @@ pub async fn chat_completions(
     State(state): State<ApiState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
-    let (fmt, model_name, ctx_size, model_identity, engine_arc, cache) = {
+    let (model_name, ctx_size, model_identity, engine_arc, cache) = {
         let engine_guard = match state.engine.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -483,7 +562,6 @@ pub async fn chat_completions(
         }
 
         (
-            engine_guard.fmt.clone(),
             engine_guard.model_name.clone(),
             engine_guard.get_ctx_size(),
             engine_guard
@@ -514,18 +592,36 @@ pub async fn chat_completions(
         })
         .collect();
 
-    let prompt = build_prompt(&fmt, &messages);
+    let prepared_request = {
+        let engine_guard = match state.engine.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    format!("获取引擎锁失败: {}", e),
+                );
+            }
+        };
+
+        match prepare_api_chat_request(&engine_guard, &messages, ctx_size, &inference_params) {
+            Ok(prepared_request) => prepared_request,
+            Err(error) => return invalid_request(error.to_string()),
+        }
+    };
+
+    let prompt = prepared_request.prompt.clone();
     let cache_params =
-        build_generation_cache_params_key(&model_identity, ctx_size, &inference_params);
+        build_generation_cache_params_key(&model_identity, prepared_request.effective_ctx_size, &prepared_request.inference_params);
 
     if let Some(cached) = cache.get(&prompt, &cache_params) {
         let (content, finish_reason) = finalize_completion(
             cached.content,
             &stop_sequences,
             cached.token_count,
-            inference_params.max_tokens,
+            prepared_request.inference_params.max_tokens,
         );
-        let prompt_tokens_calc = (prompt.len() as f32 / 4.0).ceil() as u32;
+        let prompt_tokens_calc = prepared_request.prompt_tokens as u32;
         let completion_tokens_calc = cached.token_count as u32;
 
         let response = ChatCompletionResponse {
@@ -556,13 +652,15 @@ pub async fn chat_completions(
     let shared_output: StdArc<StdMutex<(String, usize)>> =
         StdArc::new(StdMutex::new((String::new(), 0)));
     let output_for_closure = shared_output.clone();
+    let prepared_request_for_task = prepared_request.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         let res = {
-            let engine = engine_arc.lock().unwrap_or_else(|p| p.into_inner());
+            let mut engine = engine_arc.lock().unwrap_or_else(|p| p.into_inner());
+            engine.set_ctx_size(prepared_request_for_task.effective_ctx_size);
             engine.generate_stream_with_params(
-                messages,
-                inference_params.clone(),
+                prepared_request_for_task.messages,
+                prepared_request_for_task.inference_params.clone(),
                 move |token: String| {
                     if token.is_empty() {
                         return;
@@ -590,9 +688,9 @@ pub async fn chat_completions(
                     content,
                     &stop_sequences,
                     generated_tokens,
-                    inference_params.max_tokens,
+                    prepared_request.inference_params.max_tokens,
                 );
-                let prompt_tokens_calc = (prompt.len() as f32 / 4.0).ceil() as u32;
+                let prompt_tokens_calc = prepared_request.prompt_tokens as u32;
                 let completion_tokens_calc = generated_tokens as u32;
                 cache.set(&prompt, &cache_params, &content, generated_tokens);
                 Ok((
