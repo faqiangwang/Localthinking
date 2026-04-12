@@ -1,6 +1,6 @@
 // src/components/MessageBubble.tsx
 import { Message } from "../types";
-import { memo, useState, useEffect, useRef } from "react";
+import { memo } from "react";
 import { MessageContent } from "./MessageBubble/CodeHighlighter";
 
 interface MessageBubbleProps {
@@ -59,16 +59,22 @@ function fallbackAnswerFromThinkingOnlyContent(content: string, thinking: string
   return stripped || thinking || '';
 }
 
+function resolveThinkingPattern(content: string) {
+  return (
+    THINKING_BLOCK_PATTERNS.find(candidate => content.match(candidate.thinking)) ||
+    THINKING_BLOCK_PATTERNS.find(candidate => content.match(candidate.partialThinking)) ||
+    THINKING_BLOCK_PATTERNS.find(candidate =>
+      candidate.answerMarkers.some(marker => content.includes(marker))
+    ) ||
+    null
+  );
+}
+
 // 解析思考过程和回答
 function parseContent(content: string, hasPartialThinking: boolean, hasPartialAnswer: boolean) {
   let thinking = null;
   let answer = content;
-  const pattern = THINKING_BLOCK_PATTERNS.find(
-    candidate =>
-      content.match(candidate.thinking) ||
-      content.match(candidate.partialThinking) ||
-      candidate.answerMarkers.some(marker => content.includes(marker))
-  );
+  const pattern = resolveThinkingPattern(content);
 
   const thinkingMatch = pattern ? content.match(pattern.thinking) : null;
   const answerMatch = pattern ? content.match(pattern.answer) : null;
@@ -122,37 +128,10 @@ function arePropsEqual(prevProps: MessageBubbleProps, nextProps: MessageBubblePr
 
 export const MessageBubble = memo(function MessageBubble({ message, streaming }: MessageBubbleProps) {
   const isUser = message.role === "user";
-  const [showThinking, setShowThinking] = useState(true);
-  const [isThinkingComplete, setIsThinkingComplete] = useState(false);
-  const prevContentRef = useRef(message.content);
-
-  // 检测 thinking 是否已完成（检测到 </思考> 标签或"回答："标记）
-  useEffect(() => {
-    const hasThinkingEndTag =
-      message.content.includes('</思考>') || message.content.toLowerCase().includes('</think>');
-    const hadThinkingEndTag =
-      prevContentRef.current.includes('</思考>') ||
-      prevContentRef.current.toLowerCase().includes('</think>');
-    const hasAnswerMarker =
-      message.content.includes('回答：') ||
-      message.content.includes('回答:') ||
-      message.content.includes('<回答>');
-    const hadAnswerMarker =
-      prevContentRef.current.includes('回答：') ||
-      prevContentRef.current.includes('回答:') ||
-      prevContentRef.current.includes('<回答>');
-
-    if ((hasThinkingEndTag && !hadThinkingEndTag) || (hasAnswerMarker && !hadAnswerMarker)) {
-      setIsThinkingComplete(true);
-    }
-
-    prevContentRef.current = message.content;
-  }, [message.content]);
 
   // 检测流式输出中是否正在生成 thinking
   const lowerContent = message.content.toLowerCase();
   const hasPartialThinking =
-    !isThinkingComplete &&
     (message.content.includes('<思考>') ||
       lowerContent.includes('<think>') ||
       message.content.includes('思考：') ||
@@ -175,12 +154,9 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
   const { thinking, answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);
   const shouldFallbackThinkingOnlyAnswer =
     !isUser && !answer && (thinking || hasPartialThinking);
-  const displayThinking = shouldFallbackThinkingOnlyAnswer ? null : thinking;
   const displayAnswer = shouldFallbackThinkingOnlyAnswer
     ? fallbackAnswerFromThinkingOnlyContent(message.content, thinking)
     : answer;
-  const showThinkingSection =
-    !isUser && !!(displayThinking || (hasPartialThinking && !shouldFallbackThinkingOnlyAnswer));
 
   return (
     <div className={`message-bubble ${isUser ? "user-message" : "assistant-message"} ${streaming ? "streaming" : ""}`}>
@@ -191,38 +167,6 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
       )}
       <div className="message-content-wrapper">
         <div className="message-content">
-          {/* 显示思考过程 */}
-          {showThinkingSection && (
-            <div className="thinking-section">
-              <div
-                className="thinking-header"
-                onClick={() => setShowThinking(!showThinking)}
-              >
-                <span className="thinking-icon">
-                  {hasPartialThinking && streaming ? '⏳' : '💭'}
-                </span>
-                <span className="thinking-title">
-                  {hasPartialThinking && streaming ? '正在思考...' : '思考过程'}
-                </span>
-                <span className={`thinking-toggle ${showThinking ? 'expanded' : 'collapsed'}`}>
-                  {showThinking ? '▼' : '▶'}
-                </span>
-              </div>
-              <div className={`thinking-content ${showThinking ? 'expanded' : 'collapsed'}`}>
-                {displayThinking ? (
-                  displayThinking.split('\n').map((line, i) => (
-                    <p key={i}>{line || '\u00A0'}</p>
-                  ))
-                ) : hasPartialThinking ? (
-                  <p>{'\u00A0'}</p>
-                ) : null}
-                {hasPartialThinking && streaming && (
-                  <p className="thinking-streaming-cursor">▊</p>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* 显示回答（带代码高亮） */}
           {displayAnswer && (
             <div className="answer-section">
@@ -230,7 +174,7 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
             </div>
           )}
 
-          {streaming && !hasPartialThinking && (
+          {streaming && (
             <span className="typing-indicator">
               <span className="cursor">▊</span>
             </span>

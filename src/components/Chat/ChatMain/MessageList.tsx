@@ -94,7 +94,7 @@ export function MessageList({ messages, streaming, focusRequest }: MessageListPr
       ))}
 
       {streaming && lastUserMessage?.role === 'user' && (
-        <MessageBubble message={{ role: 'assistant', content: '思考中...' }} streaming />
+        <MessageBubble message={{ role: 'assistant', content: '生成中...' }} streaming />
       )}
     </div>
   );

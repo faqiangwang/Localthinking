@@ -135,7 +135,7 @@ export function VirtualMessageList({ messages, streaming, focusRequest }: Virtua
               width: '100%',
             }}
           >
-            <MessageBubble message={{ role: 'assistant', content: '思考中...' }} streaming />
+            <MessageBubble message={{ role: 'assistant', content: '生成中...' }} streaming />
           </div>
         )}
       </div>
