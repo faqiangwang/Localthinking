@@ -1,10 +1,9 @@
 // src-tauri/src/chat.rs
 use crate::backend::Message;
 
-pub const RESPONSE_GUARD_SYSTEM_PROMPT: &str = "你必须直接输出最终答案。禁止输出思考过程、推理过程、计划、对用户意图的分析，禁止输出“好的，现在我要…/我需要分析用户…”这类内部独白。若能回答，就直接给出完整答案。";
 pub const INVALID_ASSISTANT_RESPONSE_ERROR: &str = "模型返回了内部推理文本，已自动丢弃。请重试。";
 #[allow(dead_code)]
-pub const RETRY_RESPONSE_GUARD_SYSTEM_PROMPT: &str = "上一次输出无效。这一次只能输出面向用户的最终回答正文，不要输出任何分析、计划、思考、前言、自述或解释你将如何回答。";
+pub const RETRY_RESPONSE_GUARD_SYSTEM_PROMPT: &str = "上一次输出无效，因为模型暴露了内部思考。这一次请像正常助手一样直接回答用户，不要输出思考过程、推理步骤、计划、自述、前言或类似“好的，现在我要分析用户请求”这样的内部独白。问候要自然回应，提问要直接作答，不要只回复“好的”“收到”“明白”这类空泛确认。";
 
 const RAW_REASONING_OPENINGS: &[&str] = &[
     "好",
@@ -300,7 +299,7 @@ pub fn extract_visible_assistant_content(content: &str, streaming: bool) -> Stri
 }
 
 pub fn sanitize_messages_for_inference(messages: &[Message]) -> Vec<Message> {
-    let mut sanitized: Vec<Message> = messages
+    messages
         .iter()
         .filter_map(|message| {
             if message.role != "assistant" {
@@ -312,10 +311,7 @@ pub fn sanitize_messages_for_inference(messages: &[Message]) -> Vec<Message> {
                 content,
             })
         })
-        .collect();
-
-    inject_system_prompt(&mut sanitized, RESPONSE_GUARD_SYSTEM_PROMPT);
-    sanitized
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -469,7 +465,7 @@ mod tests {
     use super::{
         build_retry_messages, detect_format, is_likely_internal_reasoning_message,
         sanitize_assistant_message_content, sanitize_messages_for_inference, PromptFormat,
-        RESPONSE_GUARD_SYSTEM_PROMPT, RETRY_RESPONSE_GUARD_SYSTEM_PROMPT,
+        RETRY_RESPONSE_GUARD_SYSTEM_PROMPT,
     };
     use crate::backend::Message;
 
@@ -502,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_messages_and_injects_response_guard() {
+    fn sanitizes_messages_without_injecting_extra_guard() {
         let sanitized = sanitize_messages_for_inference(&[
             Message {
                 role: "user".to_string(),
@@ -514,10 +510,8 @@ mod tests {
             },
         ]);
 
-        assert_eq!(sanitized.len(), 2);
-        assert_eq!(sanitized[0].role, "system");
-        assert!(sanitized[0].content.contains(RESPONSE_GUARD_SYSTEM_PROMPT));
-        assert_eq!(sanitized[1].role, "user");
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].role, "user");
     }
 
     #[test]
@@ -528,9 +522,8 @@ mod tests {
         }]);
 
         assert_eq!(sanitized[0].role, "system");
-        assert!(sanitized[0].content.contains(RESPONSE_GUARD_SYSTEM_PROMPT));
-        assert!(sanitized[0]
-            .content
-            .contains(RETRY_RESPONSE_GUARD_SYSTEM_PROMPT));
+        assert_eq!(sanitized[1].role, "user");
+        assert_eq!(sanitized[1].content, "你好");
+        assert_eq!(sanitized[0].content, RETRY_RESPONSE_GUARD_SYSTEM_PROMPT);
     }
 }
