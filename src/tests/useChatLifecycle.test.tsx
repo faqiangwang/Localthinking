@@ -122,4 +122,34 @@ describe('useChat lifecycle', () => {
       expect(screen.getByTestId('messages')).toHaveTextContent('assistant:world');
     });
   });
+
+  it('流式阶段不会把内部独白直接显示到消息列表', async () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByText('send'));
+
+    let requestId = '';
+    await waitFor(() => {
+      requestId = useChatStore.getState().activeRequestId ?? '';
+      expect(requestId).not.toBe('');
+    });
+
+    await act(async () => {
+      emit('chat://token', {
+        request_id: requestId,
+        content:
+          '好的，现在我要处理用户的请求：“给我使用c语言写一个冒泡排序”。首先，我需要分析用户的需求。',
+        n_tokens: 1,
+        tok_per_sec: 8,
+        prompt_tokens: 5,
+        prompt_tok_per_sec: 40,
+        first_token_latency_ms: 30,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('messages')).not.toHaveTextContent('现在我要处理用户的请求');
+      expect(screen.getByTestId('messages')).not.toHaveTextContent('我需要分析用户的需求');
+    });
+  });
 });
