@@ -64,15 +64,15 @@ impl FlashAttentionMode {
 mod imp {
     use super::*;
     use encoding_rs::UTF_8;
-    use llama_cpp_2::DecodeError;
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::gguf::GgufContext;
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
-    use llama_cpp_2::openai::OpenAIChatTemplateParams;
     use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::model::{AddBos, LlamaModel};
+    use llama_cpp_2::openai::OpenAIChatTemplateParams;
     use llama_cpp_2::sampling::LlamaSampler;
+    use llama_cpp_2::DecodeError;
     use llama_cpp_sys_2::{
         llama_flash_attn_type, LLAMA_FLASH_ATTN_TYPE_AUTO, LLAMA_FLASH_ATTN_TYPE_DISABLED,
         LLAMA_FLASH_ATTN_TYPE_ENABLED,
@@ -365,8 +365,8 @@ mod imp {
         }
         .max(64);
 
-        let (n_batch_cap, n_ubatch_cap) =
-            resolve_batch_caps(available_ram_gb, gpu_enabled).unwrap_or((ctx_size, default_n_batch));
+        let (n_batch_cap, n_ubatch_cap) = resolve_batch_caps(available_ram_gb, gpu_enabled)
+            .unwrap_or((ctx_size, default_n_batch));
         let resolved_n_batch = parse_env_u32("LOCALTHINKING_N_BATCH")
             .unwrap_or(default_n_batch)
             .max(64)
@@ -487,7 +487,11 @@ mod imp {
             self.ctx_size
         }
 
-        pub fn resolve_runtime_ctx_size(&self, requested_ctx_size: u32, prompt_tokens: usize) -> u32 {
+        pub fn resolve_runtime_ctx_size(
+            &self,
+            requested_ctx_size: u32,
+            prompt_tokens: usize,
+        ) -> u32 {
             let gpu_enabled = gpu_acceleration_enabled();
             let available_ram_gb = detect_available_ram_gb();
             let effective_ctx_size = resolve_effective_ctx_size_with_memory(
@@ -639,7 +643,10 @@ mod imp {
                     fallback_prompt
                 }
                 Err(error) => {
-                    eprintln!("[推理] 应用模型 chat template 失败，回退手写模板: {}", error);
+                    eprintln!(
+                        "[推理] 应用模型 chat template 失败，回退手写模板: {}",
+                        error
+                    );
                     fallback_prompt
                 }
             }
@@ -683,9 +690,15 @@ mod imp {
             }
 
             eprintln!("[推理] 提示词长度: {} tokens", tokens.len());
-            let runtime_ctx_size =
-                self.resolve_runtime_ctx_size(self.ctx_size.max(tokens.len().max(64) as u32), tokens.len());
-            let tuning = resolve_context_tuning(self.n_threads, runtime_ctx_size, gpu_acceleration_enabled());
+            let runtime_ctx_size = self.resolve_runtime_ctx_size(
+                self.ctx_size.max(tokens.len().max(64) as u32),
+                tokens.len(),
+            );
+            let tuning = resolve_context_tuning(
+                self.n_threads,
+                runtime_ctx_size,
+                gpu_acceleration_enabled(),
+            );
             let flash_attention = resolve_flash_attention_mode(self.flash_attention);
             eprintln!(
                 "[推理] 上下文调优: ctx={}, decode_threads={}, batch_threads={}, n_batch={}, n_ubatch={}, flash_attn={}, gpu={}",
@@ -1065,6 +1078,14 @@ mod imp {
             self.ctx_size
         }
 
+        pub fn resolve_runtime_ctx_size(
+            &self,
+            requested_ctx_size: u32,
+            prompt_tokens: usize,
+        ) -> u32 {
+            requested_ctx_size.max(prompt_tokens.max(64) as u32)
+        }
+
         pub fn set_flash_attention(&mut self, mode: FlashAttentionMode) {
             self.flash_attention = mode;
         }
@@ -1113,10 +1134,12 @@ mod imp {
             false
         }
 
-        pub fn count_prompt_tokens(&self, _messages: &[Message]) -> anyhow::Result<usize> {
-            Err(anyhow::anyhow!(
-                "当前构建未启用原生 llama 后端。请使用 `cargo build --no-default-features --features llama-cpp-2` 重新构建，并确保系统已安装 cmake。"
-            ))
+        pub fn count_prompt_tokens(&self, messages: &[Message]) -> anyhow::Result<usize> {
+            Ok(crate::chat::estimate_tokens(&self.render_prompt(messages)?))
+        }
+
+        pub fn render_prompt(&self, messages: &[Message]) -> anyhow::Result<String> {
+            Ok(crate::chat::build_prompt(&self.fmt, messages))
         }
 
         pub fn generate_stream_with_params<F>(

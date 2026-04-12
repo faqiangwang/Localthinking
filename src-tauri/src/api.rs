@@ -3,7 +3,10 @@
 
 use crate::backend::Message;
 use crate::cache::{build_generation_cache_params_key, InferenceCache};
-use crate::chat::truncate_messages;
+use crate::chat::{
+    sanitize_assistant_message_content, sanitize_messages_for_inference, truncate_messages,
+    INVALID_ASSISTANT_RESPONSE_ERROR,
+};
 use crate::engine::{InferenceParams, LlamaCppEngine};
 use axum::{
     extract::State,
@@ -461,12 +464,15 @@ fn prepare_api_chat_request(
             engine.resolve_runtime_ctx_size(requested_with_headroom, prompt_tokens);
         let available_generation_tokens = effective_ctx_size
             .saturating_sub(prompt_tokens as u32)
-            .saturating_sub(API_CONTEXT_MARGIN_TOKENS as u32) as usize;
+            .saturating_sub(API_CONTEXT_MARGIN_TOKENS as u32)
+            as usize;
 
         if available_generation_tokens >= min_headroom {
             let mut adjusted_params = inference_params.clone();
-            adjusted_params.max_tokens =
-                adjusted_params.max_tokens.min(available_generation_tokens as i32).max(1);
+            adjusted_params.max_tokens = adjusted_params
+                .max_tokens
+                .min(available_generation_tokens as i32)
+                .max(1);
 
             return Ok(PreparedApiChatRequest {
                 messages: prepared_messages,
@@ -591,6 +597,7 @@ pub async fn chat_completions(
             content: m.content,
         })
         .collect();
+    let messages = sanitize_messages_for_inference(&messages);
 
     let prepared_request = {
         let engine_guard = match state.engine.lock() {
@@ -611,39 +618,51 @@ pub async fn chat_completions(
     };
 
     let prompt = prepared_request.prompt.clone();
-    let cache_params =
-        build_generation_cache_params_key(&model_identity, prepared_request.effective_ctx_size, &prepared_request.inference_params);
+    let cache_params = build_generation_cache_params_key(
+        &model_identity,
+        prepared_request.effective_ctx_size,
+        &prepared_request.inference_params,
+    );
 
     if let Some(cached) = cache.get(&prompt, &cache_params) {
-        let (content, finish_reason) = finalize_completion(
-            cached.content,
-            &stop_sequences,
-            cached.token_count,
-            prepared_request.inference_params.max_tokens,
-        );
-        let prompt_tokens_calc = prepared_request.prompt_tokens as u32;
-        let completion_tokens_calc = cached.token_count as u32;
+        if let Some(cached_content) = sanitize_assistant_message_content(&cached.content) {
+            if cached_content != cached.content {
+                cache.set(&prompt, &cache_params, &cached_content, cached.token_count);
+            }
 
-        let response = ChatCompletionResponse {
-            id: generate_id(),
-            object: "chat.completion".to_string(),
-            created: current_timestamp(),
-            model: model_name,
-            choices: vec![ChatChoice {
-                index: 0,
-                message: ResponseMessage {
-                    role: "assistant".to_string(),
-                    content,
+            let (content, finish_reason) = finalize_completion(
+                cached_content,
+                &stop_sequences,
+                cached.token_count,
+                prepared_request.inference_params.max_tokens,
+            );
+            let prompt_tokens_calc = prepared_request.prompt_tokens as u32;
+            let completion_tokens_calc = cached.token_count as u32;
+
+            let response = ChatCompletionResponse {
+                id: generate_id(),
+                object: "chat.completion".to_string(),
+                created: current_timestamp(),
+                model: model_name,
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: ResponseMessage {
+                        role: "assistant".to_string(),
+                        content,
+                    },
+                    finish_reason,
+                }],
+                usage: Usage {
+                    prompt_tokens: prompt_tokens_calc,
+                    completion_tokens: completion_tokens_calc,
+                    total_tokens: prompt_tokens_calc + completion_tokens_calc,
                 },
-                finish_reason,
-            }],
-            usage: Usage {
-                prompt_tokens: prompt_tokens_calc,
-                completion_tokens: completion_tokens_calc,
-                total_tokens: prompt_tokens_calc + completion_tokens_calc,
-            },
-        };
-        return (StatusCode::OK, Json(response)).into_response();
+            };
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+
+        cache.remove(&prompt, &cache_params);
+        eprintln!("[缓存] API 丢弃无效回复缓存并重新生成");
     }
 
     use std::sync::Arc as StdArc;
@@ -690,11 +709,13 @@ pub async fn chat_completions(
                     generated_tokens,
                     prepared_request.inference_params.max_tokens,
                 );
+                let sanitized_content = sanitize_assistant_message_content(&content)
+                    .ok_or_else(|| INVALID_ASSISTANT_RESPONSE_ERROR.to_string())?;
                 let prompt_tokens_calc = prepared_request.prompt_tokens as u32;
                 let completion_tokens_calc = generated_tokens as u32;
-                cache.set(&prompt, &cache_params, &content, generated_tokens);
+                cache.set(&prompt, &cache_params, &sanitized_content, generated_tokens);
                 Ok((
-                    content,
+                    sanitized_content,
                     finish_reason,
                     prompt_tokens_calc,
                     completion_tokens_calc,

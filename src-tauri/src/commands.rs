@@ -2,7 +2,10 @@
 use crate::api::ApiServerManager;
 use crate::backend::{InferenceBackend, Message};
 use crate::cache::{build_generation_cache_params_key, InferenceCache};
-use crate::chat::truncate_messages;
+use crate::chat::{
+    sanitize_assistant_message_content, sanitize_messages_for_inference, truncate_messages,
+    INVALID_ASSISTANT_RESPONSE_ERROR,
+};
 use crate::engine::{FlashAttentionMode, InferenceParams, LlamaCppEngine};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -139,12 +142,15 @@ fn prepare_chat_request(
             engine.resolve_runtime_ctx_size(requested_with_headroom, prompt_tokens);
         let available_generation_tokens = effective_ctx_size
             .saturating_sub(prompt_tokens as u32)
-            .saturating_sub(CONTEXT_MARGIN_TOKENS as u32) as usize;
+            .saturating_sub(CONTEXT_MARGIN_TOKENS as u32)
+            as usize;
 
         if available_generation_tokens >= min_headroom {
             let mut adjusted_params = inference_params.clone();
-            adjusted_params.max_tokens =
-                adjusted_params.max_tokens.min(available_generation_tokens as i32).max(1);
+            adjusted_params.max_tokens = adjusted_params
+                .max_tokens
+                .min(available_generation_tokens as i32)
+                .max(1);
 
             if history_trimmed {
                 eprintln!(
@@ -266,6 +272,7 @@ pub async fn chat_stream(
     state: State<'_, EngineState>,
     cache: State<'_, InferenceCache>,
 ) -> Result<(), String> {
+    let messages = sanitize_messages_for_inference(&messages);
     eprintln!("[INFO] chat_stream 开始，收到 {} 条消息", messages.len());
     let (inference_params, requested_ctx_size) = sanitize_chat_generation_params(params);
 
@@ -349,12 +356,30 @@ pub async fn chat_stream(
     );
 
     if let Some(cached) = cache.get(&prompt, &cache_params) {
-        if !cached.content.is_empty() {
+        if let Some(cached_content) = sanitize_assistant_message_content(&cached.content) {
+            if cached_content != cached.content {
+                cache.set(&prompt, &cache_params, &cached_content, cached.token_count);
+            }
+
+            if !cached_content.is_empty() {
+                let _ = window.emit(
+                    "chat://token",
+                    &ChatTokenEvent {
+                        request_id: request_id.clone(),
+                        content: cached_content,
+                        n_tokens: cached.token_count,
+                        tok_per_sec: 0.0,
+                        prompt_tokens,
+                        prompt_tok_per_sec: 0.0,
+                        first_token_latency_ms: 0.0,
+                    },
+                );
+            }
+
             let _ = window.emit(
-                "chat://token",
-                &ChatTokenEvent {
-                    request_id: request_id.clone(),
-                    content: cached.content,
+                "chat://done",
+                &ChatDoneEvent {
+                    request_id,
                     n_tokens: cached.token_count,
                     tok_per_sec: 0.0,
                     prompt_tokens,
@@ -362,20 +387,11 @@ pub async fn chat_stream(
                     first_token_latency_ms: 0.0,
                 },
             );
+            return Ok(());
         }
 
-        let _ = window.emit(
-            "chat://done",
-            &ChatDoneEvent {
-                request_id,
-                n_tokens: cached.token_count,
-                tok_per_sec: 0.0,
-                prompt_tokens,
-                prompt_tok_per_sec: 0.0,
-                first_token_latency_ms: 0.0,
-            },
-        );
-        return Ok(());
+        cache.remove(&prompt, &cache_params);
+        eprintln!("[缓存] 丢弃无效回复缓存并重新生成");
     }
 
     let handle = tokio::task::spawn_blocking(move || {
@@ -424,8 +440,31 @@ pub async fn chat_stream(
 
     match handle.await {
         Ok(Ok(())) => {
-            if !content.is_empty() {
-                cache.set(&prompt, &cache_params, &content, token_count);
+            let sanitized_content = match sanitize_assistant_message_content(&content) {
+                Some(content) => content,
+                None => {
+                    let message = INVALID_ASSISTANT_RESPONSE_ERROR.to_string();
+                    let _ = window.emit(
+                        "chat://error",
+                        &ChatErrorEvent {
+                            request_id,
+                            error: message.clone(),
+                            n_tokens: token_count,
+                            tok_per_sec: calculate_tok_per_sec(
+                                decode_started_at.unwrap_or(started_at),
+                                token_count,
+                            ),
+                            prompt_tokens,
+                            prompt_tok_per_sec,
+                            first_token_latency_ms,
+                        },
+                    );
+                    return Err(message);
+                }
+            };
+
+            if !sanitized_content.is_empty() {
+                cache.set(&prompt, &cache_params, &sanitized_content, token_count);
             }
             let _ = window.emit(
                 "chat://done",
@@ -488,8 +527,7 @@ pub async fn chat_stream(
 #[cfg(test)]
 mod planning_tests {
     use super::{
-        resolve_min_generation_headroom, resolve_target_generation_headroom,
-        CONTEXT_MARGIN_TOKENS,
+        resolve_min_generation_headroom, resolve_target_generation_headroom, CONTEXT_MARGIN_TOKENS,
     };
 
     #[test]

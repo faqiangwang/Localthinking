@@ -68,7 +68,10 @@ impl InferenceCache {
     pub fn get(&self, prompt: &str, params: &str) -> Option<CachedInference> {
         let key = self.generate_key(prompt, params);
         let mut cache = self.cache.lock().ok()?;
-        let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_nanos();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
 
         if let Some(entry) = cache.get_mut(&key) {
             // 检查是否过期
@@ -132,6 +135,12 @@ impl InferenceCache {
             token_count
         );
         cache.insert(key, entry);
+    }
+
+    pub fn remove(&self, prompt: &str, params: &str) -> bool {
+        let key = self.generate_key(prompt, params);
+        let mut cache = self.cache.lock().unwrap();
+        cache.remove(&key).is_some()
     }
 
     /// 清空缓存
