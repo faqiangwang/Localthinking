@@ -174,7 +174,7 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
   // 解析内容（传入 hasPartialThinking 和 hasPartialAnswer 以正确处理流式输出）
   const { thinking, answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);
   const shouldFallbackThinkingOnlyAnswer =
-    !streaming && !isUser && !answer && (thinking || hasPartialThinking);
+    !isUser && !answer && (thinking || hasPartialThinking);
   const displayThinking = shouldFallbackThinkingOnlyAnswer ? null : thinking;
   const displayAnswer = shouldFallbackThinkingOnlyAnswer
     ? fallbackAnswerFromThinkingOnlyContent(message.content, thinking)

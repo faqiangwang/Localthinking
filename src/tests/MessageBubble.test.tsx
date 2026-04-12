@@ -16,4 +16,16 @@ describe('MessageBubble reasoning fallback', () => {
     expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
     expect(screen.getByText('你好！我可以帮助你解答问题。')).toBeInTheDocument();
   });
+
+  it('流式阶段只有 think 内容时也直接显示可见回复', () => {
+    render(
+      <MessageBubble
+        message={{ role: 'assistant', content: '<think>你好！我可以帮助你写作和解答问题。' }}
+        streaming
+      />
+    );
+
+    expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
+    expect(screen.getByText('你好！我可以帮助你写作和解答问题。')).toBeInTheDocument();
+  });
 });
