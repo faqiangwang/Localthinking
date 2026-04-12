@@ -9,4 +9,11 @@ describe('MessageBubble reasoning fallback', () => {
     expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
     expect(screen.getByText('你好！')).toBeInTheDocument();
   });
+
+  it('将未闭合 think 内容在结束后降级显示为普通回答', () => {
+    render(<MessageBubble message={{ role: 'assistant', content: '<think>你好！我可以帮助你解答问题。' }} />);
+
+    expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
+    expect(screen.getByText('你好！我可以帮助你解答问题。')).toBeInTheDocument();
+  });
 });

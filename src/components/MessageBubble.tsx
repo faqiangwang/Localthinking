@@ -173,6 +173,14 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
 
   // 解析内容（传入 hasPartialThinking 和 hasPartialAnswer 以正确处理流式输出）
   const { thinking, answer } = parseContent(message.content, hasPartialThinking, hasPartialAnswer);
+  const shouldFallbackThinkingOnlyAnswer =
+    !streaming && !isUser && !answer && (thinking || hasPartialThinking);
+  const displayThinking = shouldFallbackThinkingOnlyAnswer ? null : thinking;
+  const displayAnswer = shouldFallbackThinkingOnlyAnswer
+    ? fallbackAnswerFromThinkingOnlyContent(message.content, thinking)
+    : answer;
+  const showThinkingSection =
+    !isUser && !!(displayThinking || (hasPartialThinking && !shouldFallbackThinkingOnlyAnswer));
 
   return (
     <div className={`message-bubble ${isUser ? "user-message" : "assistant-message"} ${streaming ? "streaming" : ""}`}>
@@ -184,7 +192,7 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
       <div className="message-content-wrapper">
         <div className="message-content">
           {/* 显示思考过程 */}
-          {(thinking || hasPartialThinking) && !isUser && (
+          {showThinkingSection && (
             <div className="thinking-section">
               <div
                 className="thinking-header"
@@ -201,8 +209,8 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
                 </span>
               </div>
               <div className={`thinking-content ${showThinking ? 'expanded' : 'collapsed'}`}>
-                {thinking ? (
-                  thinking.split('\n').map((line, i) => (
+                {displayThinking ? (
+                  displayThinking.split('\n').map((line, i) => (
                     <p key={i}>{line || '\u00A0'}</p>
                   ))
                 ) : hasPartialThinking ? (
@@ -216,9 +224,9 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming }:
           )}
 
           {/* 显示回答（带代码高亮） */}
-          {answer && (
+          {displayAnswer && (
             <div className="answer-section">
-              <MessageContent content={answer} streaming={streaming} />
+              <MessageContent content={displayAnswer} streaming={streaming} />
             </div>
           )}
 
