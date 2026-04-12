@@ -518,7 +518,7 @@ mod imp {
                 tool_choice: None,
                 json_schema: None,
                 grammar: None,
-                reasoning_format: None,
+                reasoning_format: Some("none"),
                 chat_template_kwargs: None,
                 add_generation_prompt: true,
                 use_jinja: true,

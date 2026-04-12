@@ -43,6 +43,22 @@ function trimOrNull(value: string | null | undefined) {
   return trimmed ? trimmed : null;
 }
 
+function fallbackAnswerFromThinkingOnlyContent(content: string, thinking: string | null) {
+  const stripped = trimOrNull(
+    content
+      .replace(/<think>/gi, '')
+      .replace(/<\/think>/gi, '')
+      .replace(/<思考>/g, '')
+      .replace(/<\/思考>/g, '')
+      .replace(/<回答>/g, '')
+      .replace(/<\/回答>/g, '')
+      .replace(/^思考[：:]\s*/g, '')
+      .replace(/\n?回答[：:]\s*/g, '\n')
+  );
+
+  return stripped || thinking || '';
+}
+
 // 解析思考过程和回答
 function parseContent(content: string, hasPartialThinking: boolean, hasPartialAnswer: boolean) {
   let thinking = null;
@@ -72,10 +88,24 @@ function parseContent(content: string, hasPartialThinking: boolean, hasPartialAn
     const answerTextMatch = content.match(pattern.partialAnswer);
     const answerText = trimOrNull(answerTextMatch?.[1]);
     answer = answerText || '';
+
+    if (!answer && thinking) {
+      return {
+        thinking: null,
+        answer: fallbackAnswerFromThinkingOnlyContent(content, thinking),
+      };
+    }
   } else if (pattern) {
     // 完整的思考过程和回答
     thinking = trimOrNull(thinkingMatch?.[1]);
     answer = trimOrNull(answerMatch?.[1]) || '';
+
+    if (!answer && thinking) {
+      return {
+        thinking: null,
+        answer: fallbackAnswerFromThinkingOnlyContent(content, thinking),
+      };
+    }
   }
 
   return { thinking, answer };
